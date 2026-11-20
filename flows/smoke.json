@@ -1,0 +1,36 @@
+{
+  "name": "smoke",
+  "note": "最小冒烟：三个 Tab 能切、能进一个模块。换新构建先跑这条，确认 App 起得来、界面点得动。断言用短词（OCR 长句会认错），换项目只改这里的文案。",
+  "startTab": "tab.home",
+  "steps": [
+    {
+      "op": "shot",
+      "id": "01-home",
+      "title": "首页",
+      "note": "底部 Tab + 主界面渲染出来了",
+      "expect": ["首页"]
+    },
+    {
+      "op": "tap",
+      "id": "tab.records",
+      "wait": 2.2
+    },
+    {
+      "op": "shot",
+      "id": "02-records",
+      "title": "记录",
+      "note": "切 Tab 后有可见变化"
+    },
+    {
+      "op": "tap",
+      "id": "tab.settings",
+      "wait": 2.2
+    },
+    {
+      "op": "shot",
+      "id": "03-settings",
+      "title": "设置",
+      "note": "第三个 Tab 也能到"
+    }
+  ]
+}

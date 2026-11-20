@@ -1,0 +1,45 @@
+{
+  "name": "currency",
+  "note": "文案断言样例：中文界面里不该出现 ISO 货币代码。改前截图判 unexpected-text，改后判 ok —— 这就是一条能进 CI 的断言。换项目只需改 expect / expectAbsent 与 tap 的 label。",
+  "startTab": "tab.settings",
+  "beforeMap": {
+    "cur-01": "before-settings.png",
+    "cur-02": "before-currency.png"
+  },
+  "steps": [
+    {
+      "op": "ensure",
+      "id": "nav-settings",
+      "text": ["设置"],
+      "then": [{ "id": "tab.settings" }],
+      "retries": 3,
+      "note": "ensure 用来穿过已知缺陷：目标文案不在屏幕上就先补点一次，再判断"
+    },
+    {
+      "op": "shot",
+      "id": "cur-01",
+      "title": "设置首页",
+      "note": "这一屏不该出现裸 ISO 代码",
+      "expect": ["设置"],
+      "expectAbsent": ["CNY", "USD", "HKD"]
+    },
+    {
+      "op": "tap",
+      "label": "币种",
+      "wait": 2.4,
+      "optional": true,
+      "note": "入口名随项目改；不存在也不算失败（有些项目没有币种设置）"
+    },
+    {
+      "op": "shot",
+      "id": "cur-02",
+      "title": "币种设置",
+      "note": "显示名应是中文名，代码只出现在选择器选项里",
+      "expect": [],
+      "expectAbsent": ["CNY", "USD", "HKD"]
+    },
+    {
+      "op": "back"
+    }
+  ]
+}

@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    # 不装 Xcode/axe 也能跑：单测只覆盖纯逻辑（配置解析、流程校验、判定规则）。
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pytest
+      - name: Unit tests
+        run: python -m pytest tests -q
+      - name: CLI smoke (no simulator needed)
+        run: |
+          ujshot --version
+          ujshot init --name smoke
+          ujshot run --flow smoke --dry-run || true

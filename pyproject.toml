@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ujshot"
+version = "0.1.0"
+description = "iOS simulator UI walkthrough automation: tap through screens, screenshot, capture the accessibility tree and Vision OCR, and produce an HTML gallery. Works as a CI gate too."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "monkey-sking" }]
+keywords = ["ios", "simulator", "screenshot", "ui-testing", "accessibility", "ocr", "walkthrough"]
+classifiers = [
+  "Environment :: MacOS X",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Testing",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# 像素差异（no-visible-change 判定）。不装也能跑，只是跳过 diff 判定。
+diff = ["pillow>=9.0"]
+
+[project.scripts]
+ujshot = "ujshot.cli:main"
+
+[tool.setuptools]
+packages = ["ujshot"]
+
+[tool.setuptools.package-data]
+ujshot = ["assets/*.swift", "assets/*.json"]

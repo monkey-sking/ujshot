@@ -96,6 +96,8 @@ def main(argv=None) -> int:
     p_board.add_argument("--name", default="", help="配合 --serve：板名（默认取目录名）")
     p_board.add_argument("--open", action="store_true", help="配合 --serve：起完自动开浏览器")
     p_board.add_argument("--sim-udid", default=None, help="配合 --serve：实时操作模式的模拟器 UDID")
+    p_board.add_argument("--list", action="store_true", dest="board_list",
+                         help="列出已登记的评审板（等同 ujshot-board --list）")
     p_board.add_argument("--fixes", metavar="DIR",
                          help="按批注列出「哪个问题修于哪个版本」，看一张图跨版本修复的情况")
 
@@ -347,6 +349,10 @@ def _cmd_check(args) -> int:
 # --------------------------------------------------------------------------- board
 
 def _cmd_board(args) -> int:
+    if getattr(args, "board_list", False):
+        from . import reviewboard
+        reviewboard.main(["--list"])
+        return 0
     if getattr(args, "serve", None) is not None:
         # 自带评审板：不用再配 board.script，也不用在项目里放一份脚本
         from . import reviewboard

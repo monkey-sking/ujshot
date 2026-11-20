@@ -214,8 +214,55 @@ def _free_port(preferred: int) -> int:
     raise RuntimeError(f"没有空闲端口（从 {preferred} 起试了 20 个）")
 
 
+def _probe_service(port: int):
+    """Is a board service already listening here? Returns its /api/boards payload."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/boards", timeout=1.2) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, dict) and isinstance(data.get("boards"), list):
+            return data
+    except Exception:
+        return None
+    return None
+
+
+def _register(port: int, board_dir: str):
+    """Ask a running service to host this directory. Returns {"name","dir"} or None."""
+    body = json.dumps({"dir": os.path.abspath(board_dir),
+                       "name": os.path.basename(os.path.abspath(board_dir))}).encode("utf-8")
+    req = urllib.request.Request(f"http://127.0.0.1:{port}/api/boards", data=body,
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data.get("board") if data.get("ok") else None
+    except Exception:
+        return None
+
+
 def serve(board_dir: str, script: str, port: int = 8766, open_browser=True, udid=None):
-    """Launch an external board script for this directory. Returns its URL."""
+    """Make sure a board service hosts *board_dir*; return this board's URL.
+
+    One service, many boards: if something is already listening we register the
+    directory with it instead of spawning a second process on a second port.
+    Boards live under ``/b/<name>/`` so two boards never share image paths.
+    """
+    board_dir = os.path.abspath(board_dir)
+
+    # 1) 已有服务 → 直接登记，不新起进程
+    for p in range(port, port + 20):
+        found = _probe_service(p)
+        if found is None:
+            continue
+        entry = _register(p, board_dir)
+        if entry:
+            url = f"http://127.0.0.1:{p}/b/{urllib.parse.quote(entry['name'])}/"
+            with open(os.path.join(board_dir, ".board-url"), "w") as f:
+                f.write(url + "\n")
+            return url
+        raise RuntimeError(f"端口 {p} 上已有板子服务，但登记失败")
+
+    # 2) 没有服务 → 起一个
     if not script:
         raise RuntimeError("没有配置 review board 脚本（ujshot.toml 的 [board] script 或 --board-script）")
     if not os.path.exists(script):
@@ -228,13 +275,15 @@ def serve(board_dir: str, script: str, port: int = 8766, open_browser=True, udid
         cmd += ["--no-open"]
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                      start_new_session=True)
-    time.sleep(1.2)
+    time.sleep(1.5)
+    # 服务按板名挂前缀：读它自己写下的地址，别在这里猜
     url = f"http://127.0.0.1:{free}"
-    try:
-        with open(os.path.join(board_dir, ".board-url"), "w") as f:
-            f.write(url + "\n")
-    except OSError:
-        pass
+    path = os.path.join(board_dir, ".board-url")
+    if os.path.exists(path):
+        with open(path) as f:
+            got = f.read().strip()
+        if got:
+            url = got
     return url
 
 

@@ -154,6 +154,47 @@ def app_container(udid: str, bundle: str) -> str:
     return r.stdout.strip()
 
 
+def app_version(udid: str, bundle: str, app_path: str = "") -> dict:
+    """Read the version the *installed* app reports, not the repo's config.
+
+    为什么必须读装上去的那份：构建号是从 project.yml 抄到 Info.plist 的，
+    仓库里的数字和模拟器上那个包完全可能不是一回事（"本机改了但没出包"就是这样）。
+    截图证据上写的版本，必须以实际跑起来的那份为准。
+
+    Returns {"short": "0.1.0", "build": "237", "label": "0.1.0 (237)", "source": "..."}.
+    Missing keys are empty strings, never guessed.
+    """
+    import plistlib
+
+    plist = ""
+    if app_path:
+        candidate = os.path.join(app_path, "Info.plist")
+        if os.path.exists(candidate):
+            plist = candidate
+    if not plist and bundle:
+        r = run(["xcrun", "simctl", "get_app_container", udid, bundle, "app"], timeout=60)
+        if r.returncode == 0 and r.stdout.strip():
+            candidate = os.path.join(r.stdout.strip(), "Info.plist")
+            if os.path.exists(candidate):
+                plist = candidate
+
+    short = build = ""
+    if plist:
+        try:
+            with open(plist, "rb") as f:
+                info = plistlib.load(f)
+            short = str(info.get("CFBundleShortVersionString", "") or "")
+            build = str(info.get("CFBundleVersion", "") or "")
+        except Exception:
+            pass
+
+    if short and build:
+        label = f"{short} ({build})"
+    else:
+        label = short or build
+    return {"short": short, "build": build, "label": label, "source": plist}
+
+
 # --------------------------------------------------------------------------- 交互
 
 def tap_point(axe: str, udid: str, x: float, y: float, post_delay: float = 0.5) -> bool:

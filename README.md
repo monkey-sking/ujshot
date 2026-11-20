@@ -204,6 +204,40 @@ print(r.ok, len(r.shots), r.anomalies)
 
 ---
 
+## 版本号
+
+图册和评审板都会记录**这批截图是哪个版本拍的**。读的是模拟器上那份包的
+`Info.plist`（`CFBundleShortVersionString` + `CFBundleVersion`），不是仓库里的配置——
+因为「本机改了但没出包」时这两个数字不一样，证据必须写实际跑起来的那份。
+
+```bash
+ujshot run --flow smoke --open
+# 输出：版本 0.1.0 (237)
+```
+
+- 图册顶部会显示；`steps.json` 的 `meta.version` 也有一份
+- 灌评审板时自动写进 `<board>/versions.json`（`--board-as-after` 就记到 `after`，否则 `before`）
+- 读不到 Info.plist 就留空并在图册标「未标版本」，**不猜**
+
+单独补标 / 改标（比如从别处导入了一批旧图）：
+
+```bash
+ujshot board --set-version "0.1.0 (233)" --side before --into out/board
+ujshot board --set-version "0.1.0 (236)" --side after --image old.png --into out/board
+```
+
+`versions.json` 是**旁挂文件**，和 `annotations.json` 分开：清空批注不会把版本信息一起抹掉。
+
+```json
+{
+  "before": "0.1.0 (233)",
+  "after": "0.1.0 (237)",
+  "overrides": { "before": {}, "after": { "old.png": "0.1.0 (236)" } }
+}
+```
+
+`overrides` 里放单张例外，整批标签不受影响。
+
 ## 评审板（可选）
 
 图册是**只读**的。如果需要人**在截图上框选批注、把问题回传**，`ujshot` 能喂任何

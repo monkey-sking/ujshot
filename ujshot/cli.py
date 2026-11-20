@@ -80,6 +80,11 @@ def main(argv=None) -> int:
     p_board.add_argument("--prefer", choices=["skip", "src"], default="skip",
                          help="同一张图上同名批注冲突时保留谁（默认 skip=保留目标板的）")
     p_board.add_argument("--push", metavar="URL", help="把目标板的批注推给正在运行的板子刷新")
+    p_board.add_argument("--set-version", metavar="LABEL",
+                         help="记录这批截图来自哪个版本，如 \"0.1.0 (237)\"")
+    p_board.add_argument("--side", choices=["before", "after"], default="after",
+                         help="配合 --set-version：标记改前还是改后（默认 after）")
+    p_board.add_argument("--image", help="配合 --set-version：只标这一张（默认整批）")
 
     # ---- devices
     p_dev = sub.add_parser("devices", help="列可用模拟器")
@@ -203,10 +208,20 @@ def _cmd_run(args) -> int:
         return 2
 
     result.device = _device_row(udid, cfg.device)
+    # 版本以「装上去那份」的 Info.plist 为准：仓库里的数字和模拟器上的包
+    # 完全可能不是一回事（本机改了但没出包），证据上写的必须是后者。
+    version = dev.app_version(udid, cfg.bundle_id, args.app or "")
+    if version["label"]:
+        print(f"  版本 {version['label']}")
+    else:
+        print("  版本 未知（读不到 Info.plist，图册里会标「未标版本」）")
+
     meta = {
         "when": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "seed": os.path.basename(args.seed) if args.seed else "",
         "app": os.path.basename(args.app.rstrip("/")) if args.app else "",
+        "version": version["label"],
+        "bundle": cfg.bundle_id,
     }
     page = gallery.write(result, flow_note=fl.note, extra_meta={k: v for k, v in meta.items() if v})
 
@@ -221,6 +236,11 @@ def _cmd_run(args) -> int:
             baseline_dir=args.board_baseline, before_map=fl.before_map)
         count = board.write_annotations(bdir, result.shots, as_after=args.board_as_after,
                                         when=meta["when"])
+        # 版本跟着图一起进板子：不然过两天就没人知道这批是哪个 Build
+        side = "after" if args.board_as_after else "before"
+        if version["label"]:
+            board.write_versions(bdir, side, version["label"])
+            print(f"  版本 → {side}: {version['label']}（写进 versions.json）")
         print(f"评审板：{bdir}")
         print(f"  放下 {len(placed)} 张 → {'after/' if args.board_as_after else '根目录'}")
         if seeded:
@@ -301,6 +321,22 @@ def _cmd_check(args) -> int:
 # --------------------------------------------------------------------------- board
 
 def _cmd_board(args) -> int:
+    if args.set_version:
+        if not args.into:
+            print("✗ --set-version 需要 --into <板子目录>", file=sys.stderr)
+            return 2
+        try:
+            data = board.write_versions(args.into, args.side, args.set_version, args.image or "")
+        except (ValueError, OSError) as exc:
+            print(f"✗ {exc}", file=sys.stderr)
+            return 2
+        scope = args.image or "整批"
+        print(f"已记录 {args.side} {scope} = {args.set_version}")
+        print(json.dumps(data, ensure_ascii=False, indent=1))
+        if args.push and board.push_annotations(args.push, args.into):
+            print(f"已刷新运行中的板子：{args.push}")
+        return 0
+
     if args.import_src or args.import_url:
         if not args.into:
             print("✗ 导入需要 --into <目标板目录>", file=sys.stderr)

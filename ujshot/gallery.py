@@ -105,7 +105,7 @@ def write(result: RunResult, flow_note: str = "", extra_meta=None) -> str:
     sub = (f'{htmllib.escape(result.device.name)} · UDID {result.device.udid[:8]}'
            f' · {len(result.shots)} 屏')
     if extra_meta:
-        for key in ("when", "seed", "app"):
+        for key in ("when", "seed", "app", "version", "bundle"):
             if extra_meta.get(key):
                 sub += f" · {htmllib.escape(str(extra_meta[key]))}"
 

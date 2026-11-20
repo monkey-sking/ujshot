@@ -34,6 +34,7 @@ from datetime import datetime
 
 MARK = "ujshot"          # our annotations carry source=<MARK> so re-runs can replace them
 RELEVANT = ("open", "rejected", "fixed")
+VERSIONS_NAME = "versions.json"
 
 
 def _log(msg: str) -> None:
@@ -224,6 +225,40 @@ def push_annotations(url: str, board_dir: str) -> bool:
             return resp.status == 200
     except Exception:
         return False
+
+
+def write_versions(board_dir: str, side: str, label: str, image: str = "") -> dict:
+    """Record which build a batch of screenshots came from.
+
+    Versions live beside the annotations, not inside them: clearing annotations
+    must not erase "this was Build 237". ``image`` targets a single exception.
+    """
+    path = os.path.join(board_dir, VERSIONS_NAME)
+    data = {"before": "", "after": "", "overrides": {"before": {}, "after": {}}}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+            if isinstance(raw, dict):
+                data.update({k: raw.get(k, data[k]) for k in ("before", "after")})
+                ov = raw.get("overrides") or {}
+                if isinstance(ov, dict):
+                    data["overrides"] = {
+                        "before": dict(ov.get("before") or {}),
+                        "after": dict(ov.get("after") or {}),
+                    }
+        except (OSError, json.JSONDecodeError):
+            pass
+    if side not in ("before", "after"):
+        raise ValueError("side 必须是 before 或 after")
+    if image:
+        data["overrides"].setdefault(side, {})[image] = label
+    else:
+        data[side] = label
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    return data
 
 
 # --------------------------------------------------------------------------- 迁移

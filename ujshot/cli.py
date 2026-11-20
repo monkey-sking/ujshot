@@ -89,6 +89,13 @@ def main(argv=None) -> int:
     p_board.add_argument("--image", help="配合 --set-version：只标这一张（默认整批）")
     p_board.add_argument("--round", metavar="BUILD",
                          help="配合 --set-version：这一轮（after/<BUILD>/）的版本标签")
+    p_board.add_argument("--serve", metavar="DIR", nargs="?", const="",
+                         help="起评审板服务；给 DIR 则把这块板登记进去（不给 DIR 就只起服务）")
+    p_board.add_argument("--port", type=int, default=None,
+                         help="配合 --serve：服务端口（默认读 ujshot.toml 的 board.port）")
+    p_board.add_argument("--name", default="", help="配合 --serve：板名（默认取目录名）")
+    p_board.add_argument("--open", action="store_true", help="配合 --serve：起完自动开浏览器")
+    p_board.add_argument("--sim-udid", default=None, help="配合 --serve：实时操作模式的模拟器 UDID")
     p_board.add_argument("--fixes", metavar="DIR",
                          help="按批注列出「哪个问题修于哪个版本」，看一张图跨版本修复的情况")
 
@@ -340,6 +347,22 @@ def _cmd_check(args) -> int:
 # --------------------------------------------------------------------------- board
 
 def _cmd_board(args) -> int:
+    if getattr(args, "serve", None) is not None:
+        # 自带评审板：不用再配 board.script，也不用在项目里放一份脚本
+        from . import reviewboard
+        cfg = config.load(".")
+        port = args.port or cfg.board_port or 8766
+        argv = [os.path.abspath(args.serve) if args.serve else "", "--port", str(port)]
+        if args.name:
+            argv += ["--name", args.name]
+        if not args.open:
+            argv += ["--no-open"]
+        if args.sim_udid:
+            argv += ["--sim-udid", args.sim_udid]
+        if cfg.bundle_id:
+            argv += ["--sim-bundle", cfg.bundle_id]
+        reviewboard.main(argv)
+        return 0
     if args.fixes:
         try:
             mapping = board.fix_builds(args.fixes, args.image or "")

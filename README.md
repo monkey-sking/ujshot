@@ -238,10 +238,19 @@ ujshot board --set-version "0.1.0 (236)" --side after --image old.png --into out
 
 `overrides` 里放单张例外，整批标签不受影响。
 
-## 评审板（可选）
+## 评审板（内置）
 
-图册是**只读**的。如果需要人**在截图上框选批注、把问题回传**，`ujshot` 能喂任何
-遵守下面目录约定的板子：
+图册是**只读**的。要人**在截图上框选批注、把问题回传**，用自带的评审板：
+`ujshot-board`（等同 `ujshot board --serve`）。**一个服务托管所有板子**，板子挂在
+`/b/<板名>/`，页头板名就是切换入口。
+
+```bash
+ujshot-board <board-dir>              # 起服务 / 把这块板登记到已在跑的服务
+ujshot-board --list                   # 有哪些板
+ujshot-board <board-dir> --port 8766  # 指定端口
+```
+
+目录约定（任何遵守同样约定的板子也能接）：
 
 ```
 <board-dir>/                  # 改前图
@@ -250,11 +259,13 @@ ujshot board --set-version "0.1.0 (236)" --side after --image old.png --into out
 <board-dir>/annotations.json  # {"version":1,"annotations":[...]}
 ```
 
+板子清单跟着项目走（`<仓库>/.ujshot/boards.json`，存相对路径）；端口和 bundle id
+读项目自己的 `ujshot.toml`，工具里不写死任何项目。
+
 ```bash
 ujshot run --flow smoke \
   --board-dir out/board --board-as-after \
-  --board-baseline out/old-screens \
-  --board-script ~/dev/your-board.py --serve
+  --board-baseline out/old-screens --serve
 ```
 
 | 参数 | 作用 |
@@ -263,7 +274,7 @@ ujshot run --flow smoke \
 | `--board-as-after` | 进 `after/`（改名后图） |
 | `--board-round` | 进 `after/<build>/`；默认取 App 的构建号，`none` 退回 `after/` 根目录 |
 | `--board-baseline` | 改前图目录，按流程的 `beforeMap` 配对 |
-| `--board-script` | 板子程序；`--serve` 时用它起服务 |
+| `--board-script` | 换用别的板子程序；不写就用内置的 |
 | `--serve` | 起板子并打印地址 |
 
 自动批注带 `source: "ujshot"`，**重跑只替换自己那批，不动人的批注**。

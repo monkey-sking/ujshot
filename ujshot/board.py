@@ -262,13 +262,14 @@ def serve(board_dir: str, script: str, port: int = 8766, open_browser=True, udid
             return url
         raise RuntimeError(f"端口 {p} 上已有板子服务，但登记失败")
 
-    # 2) 没有服务 → 起一个
-    if not script:
-        raise RuntimeError("没有配置 review board 脚本（ujshot.toml 的 [board] script 或 --board-script）")
-    if not os.path.exists(script):
-        raise RuntimeError(f"review board 脚本不存在：{script}")
+    # 2) 没有服务 → 起一个（内置评审板，不用项目里放脚本）
     free = _free_port(port)
-    cmd = [sys.executable, script, board_dir, "--port", str(free)]
+    if script:
+        if not os.path.exists(script):
+            raise RuntimeError(f"review board 脚本不存在：{script}")
+        cmd = [sys.executable, script, board_dir, "--port", str(free)]
+    else:
+        cmd = [sys.executable, "-m", "ujshot.reviewboard", board_dir, "--port", str(free)]
     if udid:
         cmd += ["--sim-udid", udid]
     if not open_browser:

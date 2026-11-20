@@ -25,6 +25,7 @@ diff = ["pillow>=9.0"]
 
 [project.scripts]
 ujshot = "ujshot.cli:main"
+ujshot-board = "ujshot.reviewboard:main"
 
 [tool.setuptools]
 packages = ["ujshot"]

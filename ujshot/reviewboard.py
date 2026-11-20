@@ -856,12 +856,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 7px;
   }
   .card.active { border-color: var(--ai); box-shadow: 0 0 0 1px rgba(45,212,191,.4); }
-  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
-  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: nowrap; gap: 6px; font-size: 12px; }
+  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: nowrap; gap: 4px; flex-shrink: 0; }
   .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.4; }
   .badge.ai { background: rgba(45,212,191,.16); color: var(--ai); }
   .badge.user { background: rgba(249,115,22,.18); color: var(--user); }
-  .coords { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; white-space: nowrap; margin-left: auto; }
+  .coords { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
   /* 轮次条：同一问题修了几轮，一行看全。未给结论的轮次只显示构建号 */
   .round-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -1px; }
   .round-chip {
@@ -948,7 +948,6 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <button id="modeAnnotateBtn" class="active" onclick="setBoardMode('annotate')">✏️ 批注</button>
     </div>
     <div class="seg" id="statusSeg">
-      <button class="pillbtn" id="pillActionable" data-filter="actionable" onclick="toggleActionable()" title="待处理 + 待验收 + 已驳回">需处理 0</button>
       <button class="pillbtn" id="pillOpen" data-filter="open" onclick="toggleStatusFilter('open')" title="待处理">待处理 0</button>
       <button class="pillbtn" id="pillFixed" data-filter="fixed" onclick="toggleStatusFilter('fixed')" title="待验收">待验收 0</button>
       <button class="pillbtn" id="pillRejected" data-filter="rejected" onclick="toggleStatusFilter('rejected')" title="已驳回">已驳回 0</button>
@@ -1045,11 +1044,8 @@ let allNames = [];   // 改前 ∪ 改后：只列 before 会让"只有改后"�
 
 function matchesFilter(a) {
   // 全板只用顶部那一条状态筛选：它同时管左边列表和右边批注卡。
-  // 同一个含义不摆两排按钮——一排写着"已通过 13"在左边筛图、另一排在右边筛卡，
-  // 点了只变一半，比没有更让人迷惑。
   if (!statusFilter) return true;
-  const want = statusFilter === "actionable" ? ACTIONABLE : [statusFilter];
-  return want.includes(bucketOf(a));
+  return bucketOf(a) === statusFilter;
 }
 
 function autoSizeTextarea(el) {
@@ -1158,8 +1154,6 @@ let imageQuery = "";
 // 看起来像按钮坏了。多选需求交给下面那个显式的「需处理」预设。
 let statusFilter = null;
 
-const ACTIONABLE = ["open", "fixed", "rejected"];   // 还等着人处理的三种
-
 function bucketOf(a) {
   return (a.status === "approved") ? "open" : (a.status || "open");
 }
@@ -1197,11 +1191,6 @@ function toggleStatusFilter(key) {
   render();
 }
 
-function toggleActionable() {
-  statusFilter = (statusFilter === "actionable") ? null : "actionable";
-  render();
-}
-
 function clearImageFilters() {
   imageQuery = "";
   statusFilter = null;
@@ -1217,9 +1206,8 @@ function onImageSearch(v) {
 
 function imageMatches(img) {
   if (statusFilter) {
-    const want = statusFilter === "actionable" ? ACTIONABLE : [statusFilter];
     const anns = state.annotations.filter(a => a.image === img);
-    if (!anns.some(a => want.includes(bucketOf(a)))) return false;
+    if (!anns.some(a => bucketOf(a) === statusFilter)) return false;
   }
   if (imageQuery) {
     const anns = state.annotations.filter(a => a.image === img);
@@ -1315,9 +1303,75 @@ function buildNoOf(v) {
 }
 
 function fixedInOf(a) {
+  if (a && a.fixedIn) return String(a.fixedIn).replace(/^\D+/, "");
   const m = BUILD_RE.exec((a.aiReply || "") + " " + (a.text || ""));
-  if (m) return m[1];
-  return a.fixedIn ? String(a.fixedIn).replace(/^\D+/, "") : "";
+  return m ? m[1] : "";
+}
+
+function raisedInOf(a) {
+  if (a && a.raisedIn) return String(a.raisedIn).replace(/^\D+/, "");
+  return "";
+}
+
+function hasRoundImage(img, build) {
+  if (!build) return false;
+  return (state.afterRounds || []).some(r => String(r.build) === String(build) && (r.images || []).includes(img));
+}
+
+function urlForBuild(img, build, fallbackSide, bust) {
+  let path;
+  if (build && hasRoundImage(img, build)) {
+    path = api(`/after/${encodeURIComponent(build)}/${encodeURIComponent(img)}`);
+  } else if (fallbackSide === "after" && (state.afterImages || []).includes(img)) {
+    return afterUrl(img, bust);
+  } else if (state.images.includes(img)) {
+    path = api(`/images/${encodeURIComponent(img)}`);
+  } else {
+    return afterUrl(img, bust);
+  }
+  return bust ? `${path}?t=${Date.now()}` : path;
+}
+
+function verLabelForBuild(img, build, fallbackSide) {
+  const v = state.versions || {};
+  if (build) {
+    const rl = (v.rounds || {})[build];
+    if (rl) return rl;
+    return `Build ${build}`;
+  }
+  return verOf(img, fallbackSide);
+}
+
+// 舞台左栏 =「提出问题的版本图」，右栏 =「修复问题的版本图」
+function stageBuildsFor(img) {
+  const anns = state.annotations.filter(a => a.image === img && matchesFilter(a));
+  const allAnns = state.annotations.filter(a => a.image === img);
+  const focus = (selectedId && allAnns.find(a => a.id === selectedId)) || anns[0] || allAnns[0] || null;
+  const rs = roundsFor(img);
+  if (focus && (raisedInOf(focus) || fixedInOf(focus))) {
+    const leftB = raisedInOf(focus) || (rs.length ? rs[0] : buildNoOf(verOf(img, "before")));
+    let rightB = "";
+    if (selectedRound[img] !== undefined && rs.includes(selectedRound[img]) && String(selectedRound[img]) !== String(leftB)) {
+      rightB = selectedRound[img];
+    } else {
+      const fb = fixedInOf(focus);
+      if (fb && hasRoundImage(img, fb)) {
+        rightB = fb;
+      } else {
+        const newer = rs.filter(b => Number(b) > Number(leftB));
+        if (newer.length) rightB = newer[newer.length - 1];
+      }
+    }
+    const hasLeft = Boolean((leftB && hasRoundImage(img, leftB)) || state.images.includes(img));
+    const hasRight = Boolean(rightB && String(rightB) !== String(leftB) && hasRoundImage(img, rightB));
+    return { focus, leftBuild: leftB, rightBuild: rightB, hasLeft, hasRight };
+  }
+  const pair = pairState(img);
+  const leftB = pair.hasBefore ? buildNoOf(verOf(img, "before")) : (rs[0] || "");
+  const rightB = roundBuild(img);
+  const hasLeft = pair.hasBefore;
+  const hasRight = pair.hasAfter && (!hasLeft || !rightB || String(rightB) !== String(leftB));
+  return { focus, leftBuild: leftB, rightBuild: rightB, hasLeft, hasRight };
 }
 
 function fixBuildsOf(img) {
@@ -1356,21 +1410,15 @@ function render() {
     // 「待探讨」是长尾状态：没有就不占地方，有才出现
     if (key === "discussed") el.style.display = counts[key] > 0 ? "" : "none";
   }
-  const actBtn = document.getElementById("pillActionable");
-  if (actBtn) {
-    const n = counts.open + counts.fixed + counts.rejected;
-    actBtn.textContent = `需处理 ${n}`;
-    actBtn.classList.toggle("active", statusFilter === "actionable");
-  }
   document.getElementById("scopeBtn").textContent = showAllScope ? "全部图" : "当前图";
   document.getElementById("scopeBtn").classList.toggle("active", showAllScope);
   document.getElementById("zoomBtn").classList.toggle("active", zoom100);
   document.getElementById("canvasWrap").classList.toggle("zoom100", zoom100);
   document.getElementById("afterWrap").classList.toggle("zoom100", zoom100);
 
-  // 改前/改后：成对就并排；只有一侧就只显示那一侧（不要拿同一张图占两栏）
-  const pair = pairState(currentImage);
-  const both = pair.hasBefore && pair.hasAfter;
+  // 提出问题的版本图 vs 修复问题的版本图：跟着当前选中的批注走
+  const sb = stageBuildsFor(currentImage);
+  const both = sb.hasLeft && sb.hasRight;
   const cmpBtn = document.getElementById("compareBtn");
   cmpBtn.style.display = both ? "inline-block" : "none";
   cmpBtn.classList.toggle("active", both && compareMode);
@@ -1382,31 +1430,31 @@ function render() {
   const afterLabel = document.getElementById("afterLabel");
   const afterImg = document.getElementById("afterImg");
 
-  const showBeforeCol = pair.hasBefore;
-  // 成对时右列跟随 compareMode：收起对比就只留改前（否则「收起」等于没生效）
-  const showAfterCol = pair.hasAfter && (!both || showCompare);
+  const showBeforeCol = sb.hasLeft;
+  const showAfterCol = sb.hasRight && (!both || showCompare);
   beforeCol.style.display = showBeforeCol ? "flex" : "none";
   afterColEl.style.display = showAfterCol ? "flex" : "none";
 
-  // 列标题只写"改前 / 改后"两个词；版本号和说明都交给布局与 tooltip
+  const leftWord = sb.focus ? "提出问题" : "改前";
+  const rightWord = sb.focus ? "修复问题" : "改后";
   if (both) {
-    const vb = verOf(currentImage, "before");
-    const va = verOf(currentImage, "after");
+    const vb = verLabelForBuild(currentImage, sb.leftBuild, "before");
+    const va = verLabelForBuild(currentImage, sb.rightBuild, "after");
     beforeLabel.style.display = "flex";
-    beforeLabel.innerHTML = `改前${vb ? `<span class="ver">${vb}</span>` : ""}`;
-    afterLabel.innerHTML = `改后${va ? `<span class="ver">${va}</span>` : ""}`;
-    if (showCompare) afterImg.src = afterUrl(currentImage, true);
-    else afterImg.removeAttribute("src");     // 收起的列不请求图，避免多余 404
-  } else if (pair.hasBefore) {
-    const vb = verOf(currentImage, "before");
+    beforeLabel.innerHTML = `${leftWord}${vb ? `<span class="ver">${vb}</span>` : ""}`;
+    afterLabel.innerHTML = `${rightWord}${va ? `<span class="ver">${va}</span>` : ""}`;
+    if (showCompare) afterImg.src = urlForBuild(currentImage, sb.rightBuild, "after", true);
+    else afterImg.removeAttribute("src");
+  } else if (sb.hasLeft) {
+    const vb = verLabelForBuild(currentImage, sb.leftBuild, "before");
     beforeLabel.style.display = "flex";
-    beforeLabel.innerHTML = `改前${vb ? `<span class="ver">${vb}</span>` : ""}`;
+    beforeLabel.innerHTML = `${leftWord}${vb ? `<span class="ver">${vb}</span>` : ""}`;
     afterImg.removeAttribute("src");
   } else {
-    const va = verOf(currentImage, "after");
+    const va = verLabelForBuild(currentImage, sb.rightBuild, "after");
     beforeLabel.style.display = "none";
-    afterLabel.innerHTML = `改后${va ? `<span class="ver">${va}</span>` : ""}`;
-    afterImg.src = afterUrl(currentImage, true);
+    afterLabel.innerHTML = `${rightWord}${va ? `<span class="ver">${va}</span>` : ""}`;
+    afterImg.src = urlForBuild(currentImage, sb.rightBuild, "after", true);
   }
 
   const listEl = document.getElementById("imageList");
@@ -1524,14 +1572,14 @@ function render() {
   }
 
   const stageImg = document.getElementById("stageImg");
-  if (currentImage) {
-    stageImg.src = pair.hasBefore ? api(`/images/${encodeURIComponent(currentImage)}`) : afterUrl(currentImage, true);
+  if (currentImage && sb.hasLeft) {
+    stageImg.src = urlForBuild(currentImage, sb.leftBuild, "before", false);
   }
   const hintEl = document.getElementById("stageHint");
   if (hintEl) {
-    // 布局本身已经并排说明"这是改前 vs 改后"；只有单侧时才需要一句话
     if (!currentImage || both) hintEl.textContent = "";
-    else if (pair.hasAfter) hintEl.textContent = "只有改后";
+    else if (sb.focus && sb.hasLeft && !sb.hasRight) hintEl.textContent = "待修复（尚无新版本修复图）";
+    else if (sb.hasRight) hintEl.textContent = "只有改后";
     else hintEl.textContent = "只有改前";
   }
   // 隐藏列的图不参与命中测试：否则点隐藏区会落在看不见的图上
@@ -1547,11 +1595,20 @@ function renderOverlay() {
   const ovAfter = document.getElementById("afterOverlay");
   ovBefore.innerHTML = "";
   if (ovAfter) ovAfter.innerHTML = "";
-  const pr = pairState(currentImage);
+  const sb = stageBuildsFor(currentImage);
+  const showAfterCol = sb.hasRight && (!(sb.hasLeft && sb.hasRight) || compareMode);
   const anns = state.annotations.filter(a => a.image === currentImage && matchesFilter(a));
   for (const a of anns) {
-    // 只有改前时没有右栏，after 批注也无处可去——退回左栏，至少不丢
-    const ov = (a.target === "after" && ovAfter && pr.hasAfter) ? ovAfter : ovBefore;
+    // 标注跟着版本的图片走：只画在它被提出的那个版本图上，避免不同版本的坐标错位
+    const rb = raisedInOf(a);
+    let ov = null;
+    if (rb) {
+      if (sb.hasLeft && String(rb) === String(sb.leftBuild)) ov = ovBefore;
+      else if (showAfterCol && ovAfter && String(rb) === String(sb.rightBuild)) ov = ovAfter;
+      else continue;
+    } else {
+      ov = (a.target === "after" && ovAfter && showAfterCol) ? ovAfter : ovBefore;
+    }
     const cls = `${a.author} ${a.status}` + (a.id === selectedId ? " active" : "");
     if (a.kind === "box" && a.w > 0.01 && a.h > 0.01) {
       const box = document.createElement("div");
@@ -1601,32 +1658,42 @@ function renderCards() {
     card.id = "card-" + a.id;
     card.onclick = () => {
       if (a.image !== currentImage) currentImage = a.image;
+      delete selectedRound[a.image];
       selectedId = a.id;
       render();
     };
     const coordText = a.kind === "box"
-      ? `框 (${Math.round(a.x*100)}%,${Math.round(a.y*100)}% ${Math.round(a.w*100)}×${Math.round(a.h*100)}%)`
+      ? `${Math.round(a.x*100)}%,${Math.round(a.y*100)}%`
+      : `${Math.round(a.x*100)}%,${Math.round(a.y*100)}%`;
+    const coordTip = a.kind === "box"
+      ? `框 (${Math.round(a.x*100)}%, ${Math.round(a.y*100)}% · ${Math.round(a.w*100)}×${Math.round(a.h*100)}%)`
       : `点 (${Math.round(a.x*100)}%, ${Math.round(a.y*100)}%)`;
 
-    // 每条批注自己说清"修在哪一版"：一张图上不同问题可能分别修在不同 Build
+    // 每条批注同时说清「提出于哪一版」和「修于哪一版」，缩成一枚「232 → 237」保持卡片头部一行放完
+    const rb = raisedInOf(a);
     const fb = fixedInOf(a);
     const rounds = roundsOf(a);
     const round = activeRound(a);
     const curStatus = (round && round.status) || a.status;
     const curReason = (round && round.rejectReason !== undefined) ? round.rejectReason : a.rejectReason;
     const settled = curStatus === "accepted" || curStatus === "ignored";
-    let fixBadge = "";
-    if (fb) fixBadge = `<span class="badge fixed-in">修于 Build ${fb}</span>`;
-    else if (!settled) fixBadge = `<span class="badge unfixed">未记录修复版本</span>`;
-    // 多轮才显示轮次条：一个版本一次就修好的问题不需要多一行按钮
-    const roundBar = roundsFor(a.image).length >= 2
-      ? `<div class="round-bar">` + roundsFor(a.image).map(b => {
+    let verBadge = "";
+    if (rb && fb) verBadge = `<span class="badge fixed-in" title="提出于 Build ${rb} · 修于 Build ${fb}">${rb} → ${fb}</span>`;
+    else if (fb) verBadge = `<span class="badge fixed-in">修于 ${fb}</span>`;
+    else if (rb && !settled) verBadge = `<span class="badge unfixed" title="提出于 Build ${rb} · 待修复">${rb} → 待修复</span>`;
+    else if (rb) verBadge = `<span class="badge" style="background:rgba(148,163,184,.16);color:#cbd5e1;">Build ${rb}</span>`;
+    else if (!settled) verBadge = `<span class="badge unfixed">待修复</span>`;
+    // 轮次条只在单条问题确实经历了多轮修复（a.rounds >= 2）时展示，不把同屏其他问题的构建号全列出来
+    const candidateRounds = rounds.length >= 2 ? rounds.map(r => String(r.build)) : [];
+    const activeRightB = stageBuildsFor(a.image).rightBuild;
+    const roundBar = candidateRounds.length >= 2
+      ? `<div class="round-bar">` + candidateRounds.map(b => {
           const row = rounds.find(r => String(r.build) === String(b));
           const st = row && row.status;
-          const cls = "round-chip" + (String(b) === String(roundBuild(a.image)) ? " active" : "")
+          const cls = "round-chip" + (String(b) === String(activeRightB) ? " active" : "")
             + (st ? " on-" + st : "");
-          return `<button class="${cls}" data-build="${b}" title="${st ? ROUND_LABELS[st] : "这一轮还没给结论"}">`
-            + `${b || "本地"}${st ? ` · ${ROUND_LABELS[st]}` : ""}</button>`;
+          return `<button class="${cls}" data-build="${b}" title="${st ? ROUND_LABELS[st] : "点此查看这一版修复图"}">`
+            + `Build ${b || "本地"}${st ? ` · ${ROUND_LABELS[st]}` : ""}</button>`;
         }).join("") + `</div>`
       : "";
 
@@ -1635,10 +1702,9 @@ function renderCards() {
         <div class="card-id">
           <span>${a.id}</span>
           <span class="badge ${a.author}">${a.author === "ai" ? "AI 发现" : "我标的问题"}</span>
-          ${a.target === "after" ? '<span class="badge" style="background:rgba(34,197,94,.18);color:#86efac;">新图</span>' : ""}
-          ${fixBadge}
+          ${verBadge}
         </div>
-        <span class="coords">${showAllScope ? a.image.replace(/\.png$/i, "") + " · " : ""}${coordText}</span>
+        <span class="coords" title="${coordTip}">${showAllScope ? a.image.replace(/\.png$/i, "") + " · " : ""}${coordText}</span>
       </div>${roundBar}`;
 
     // 轮次胶囊：点哪颗就把舞台、缩略图、这一行的结论一起切到那一轮
@@ -1937,10 +2003,15 @@ function savePopover() {
   const text = document.getElementById("popText").value.trim();
   if (!text || !pendingDraft) { closePopover(); return; }
   const id = nextUserId();
+  const sb = stageBuildsFor(currentImage);
+  const clickedBuild = (pendingDraft.target === "after")
+    ? (sb.rightBuild || buildNoOf(verOf(currentImage, "after")))
+    : (sb.leftBuild || buildNoOf(verOf(currentImage, "before")));
   state.annotations.push({
     id,
     image: currentImage,
-    target: pendingDraft.target || "before",
+    target: "before",
+    raisedIn: clickedBuild || undefined,
     author: "user",
     kind: pendingDraft.kind,
     x: pendingDraft.x,

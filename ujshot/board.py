@@ -150,9 +150,50 @@ def read(board_dir: str, statuses=RELEVANT):
             "target": a.get("target", "before"), "author": a.get("author"),
             "kind": a.get("kind"), "status": a.get("status"),
             "text": a.get("text", ""), "rejectReason": a.get("rejectReason", ""),
+            # 必须在剥离 aiReply 之前算，否则下游拿到的是空值
+            "fixedIn": fixed_in(a),
             "box": {"x": a.get("x"), "y": a.get("y"), "w": a.get("w"), "h": a.get("h")},
         })
     return rows
+
+
+BUILD_RE = __import__("re").compile(r"Build\s*(\d+)", __import__("re").I)
+
+
+def fixed_in(annotation: dict) -> str:
+    """Which build fixed this specific issue.
+
+    Explicit ``fixedIn`` wins; otherwise scan ``aiReply`` for "Build 234：…",
+    which is how the replies have been written so far. Returning "" is
+    meaningful: it says nobody recorded it yet, which is exactly what a
+    reviewer needs to see rather than a guessed number.
+    """
+    explicit = str(annotation.get("fixedIn") or "").strip()
+    if explicit:
+        digits = "".join(c for c in explicit if c.isdigit())
+        return digits or explicit
+    blob = f"{annotation.get('aiReply') or ''} {annotation.get('text') or ''}"
+    m = BUILD_RE.search(blob)
+    return m.group(1) if m else ""
+
+
+def fix_builds(board_dir: str, image: str = ""):
+    """{image: [build, …]} — one original screenshot often carries several
+    issues fixed in different builds, so a single per-image version is a lie."""
+    path = os.path.join(board_dir, "annotations.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as f:
+        anns = json.load(f).get("annotations", [])
+    out = {}
+    for a in anns:
+        if image and a.get("image") != image:
+            continue
+        b = fixed_in(a)
+        if not b:
+            continue
+        out.setdefault(a.get("image", ""), set()).add(b)
+    return {k: sorted(v, key=lambda x: (len(x), x)) for k, v in out.items()}
 
 
 def _free_port(preferred: int) -> int:

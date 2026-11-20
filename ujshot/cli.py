@@ -85,6 +85,8 @@ def main(argv=None) -> int:
     p_board.add_argument("--side", choices=["before", "after"], default="after",
                          help="配合 --set-version：标记改前还是改后（默认 after）")
     p_board.add_argument("--image", help="配合 --set-version：只标这一张（默认整批）")
+    p_board.add_argument("--fixes", metavar="DIR",
+                         help="按批注列出「哪个问题修于哪个版本」，看一张图跨版本修复的情况")
 
     # ---- devices
     p_dev = sub.add_parser("devices", help="列可用模拟器")
@@ -321,6 +323,30 @@ def _cmd_check(args) -> int:
 # --------------------------------------------------------------------------- board
 
 def _cmd_board(args) -> int:
+    if args.fixes:
+        try:
+            mapping = board.fix_builds(args.fixes, args.image or "")
+        except FileNotFoundError as exc:
+            print(f"✗ {exc}", file=sys.stderr)
+            return 2
+        rows = board.read(args.fixes, statuses=None)
+        per = {}
+        for r in rows:
+            per.setdefault(r["image"], []).append(r)
+        out = []
+        for img in sorted(per):
+            issues = [{"id": r["id"], "status": r["status"],
+                       "fixedIn": r["fixedIn"] or board.fixed_in(r) or "",
+                       "text": (r["text"] or "").splitlines()[0][:60]} for r in per[img]]
+            builds = sorted({i["fixedIn"] for i in issues if i["fixedIn"]})
+            out.append({"image": img, "builds": builds, "issues": issues,
+                        "crossVersion": len(builds) > 1})
+        print(json.dumps({"board": args.fixes,
+                          "images": len(out),
+                          "crossVersion": [o["image"] for o in out if o["crossVersion"]],
+                          "detail": out}, ensure_ascii=False, indent=1))
+        return 0
+
     if args.set_version:
         if not args.into:
             print("✗ --set-version 需要 --into <板子目录>", file=sys.stderr)

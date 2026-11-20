@@ -72,6 +72,14 @@ def main(argv=None) -> int:
     p_board.add_argument("--read", metavar="DIR", help="读这个板子目录的批注")
     p_board.add_argument("--status", default="open,rejected,fixed",
                          help="只看这些状态（逗号分隔；传 all 看全部）")
+    p_board.add_argument("--import", dest="import_src", metavar="DIR",
+                         help="把另一个板子的图 + 人工批注并入目标板")
+    p_board.add_argument("--import-url", metavar="URL",
+                         help="从正在运行的板子导入（比磁盘新：带上浏览器里未保存的批注）")
+    p_board.add_argument("--into", metavar="DIR", help="目标板目录（配合 --import / --import-url）")
+    p_board.add_argument("--prefer", choices=["skip", "src"], default="skip",
+                         help="同一张图上同名批注冲突时保留谁（默认 skip=保留目标板的）")
+    p_board.add_argument("--push", metavar="URL", help="把目标板的批注推给正在运行的板子刷新")
 
     # ---- devices
     p_dev = sub.add_parser("devices", help="列可用模拟器")
@@ -293,8 +301,32 @@ def _cmd_check(args) -> int:
 # --------------------------------------------------------------------------- board
 
 def _cmd_board(args) -> int:
+    if args.import_src or args.import_url:
+        if not args.into:
+            print("✗ 导入需要 --into <目标板目录>", file=sys.stderr)
+            return 2
+        try:
+            stat = board.merge(src_dir=args.import_src or "", dst_dir=args.into,
+                               src_url=args.import_url or "", prefer=args.prefer)
+        except Exception as exc:
+            print(f"✗ 导入失败：{exc}", file=sys.stderr)
+            return 2
+        print(f"来源：{stat['source']}")
+        print(f"图片：{stat['images']} 张改前 + {stat['after']} 张改后")
+        print(f"批注：新增 {stat['added']}，重命名避让 {stat['renamed']}，"
+              f"重复跳过 {stat['duplicate']}")
+        print(f"目标：{args.into}")
+        if args.push and board.push_annotations(args.push, args.into):
+            print(f"已刷新运行中的板子：{args.push}")
+        return 0
+
+    if args.push:
+        ok = board.push_annotations(args.push, args.into or "")
+        print("已刷新" if ok else "✗ 推送失败")
+        return 0 if ok else 1
+
     if not args.read:
-        print("✗ 需要 --read <板子目录>", file=sys.stderr)
+        print("✗ 需要 --read <板子目录>，或用 --import/--import-url + --into", file=sys.stderr)
         return 2
     statuses = None if args.status.strip().lower() == "all" else tuple(
         s.strip() for s in args.status.split(",") if s.strip())

@@ -28,6 +28,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.parse
 import urllib.request
 from datetime import datetime
 
@@ -223,3 +224,139 @@ def push_annotations(url: str, board_dir: str) -> bool:
             return resp.status == 200
     except Exception:
         return False
+
+
+# --------------------------------------------------------------------------- 迁移
+
+def _http_get(url: str, timeout=5):
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return resp.read()
+
+
+def snapshot(src_dir: str = "", src_url: str = ""):
+    """Read a board's full state, from disk or from a *running* board.
+
+    Reading through HTTP matters when the board has unsaved edits in the
+    browser: ``/api/state`` returns what the page is actually showing, while
+    ``annotations.json`` only has what was already persisted.
+    """
+    if src_url:
+        raw = _http_get(src_url.rstrip("/") + "/api/state")
+        data = json.loads(raw.decode("utf-8"))
+        return {
+            "dir": data.get("dir", ""),
+            "images": data.get("images", []),
+            "after": data.get("afterImages", []),
+            "annotations": data.get("annotations", []),
+        }
+    if not src_dir:
+        raise ValueError("需要 src_dir 或 src_url")
+    path = os.path.join(src_dir, "annotations.json")
+    anns = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            anns = json.load(f).get("annotations", [])
+
+    def _imgs(sub=""):
+        d = os.path.join(src_dir, sub) if sub else src_dir
+        if not os.path.isdir(d):
+            return []
+        return sorted(n for n in os.listdir(d)
+                      if os.path.isfile(os.path.join(d, n))
+                      and n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
+                      and not n.startswith("."))
+
+    return {"dir": os.path.abspath(src_dir), "images": _imgs(), "after": _imgs("after"),
+            "annotations": anns}
+
+
+def _copy_image(src_dir, src_url, name, sub, dst_dir):
+    dst = os.path.join(dst_dir, sub, name) if sub else os.path.join(dst_dir, name)
+    if os.path.exists(dst):
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if src_url:
+        prefix = "/after/" if sub else "/images/"
+        try:
+            data = _http_get(src_url.rstrip("/") + prefix + urllib.parse.quote(name))
+        except Exception:
+            return False
+        with open(dst, "wb") as f:
+            f.write(data)
+        return True
+    src = os.path.join(src_dir, sub, name) if sub else os.path.join(src_dir, name)
+    if not os.path.exists(src):
+        return False
+    shutil.copy2(src, dst)
+    return True
+
+
+def merge(src_dir: str, dst_dir: str, src_url: str = "", prefer: str = "skip"):
+    """Pull another board's images + human annotations into *dst*.
+
+    Annotation ids are human-friendly and therefore collide across boards
+    (both boards start at U1). A colliding id whose content differs is renamed
+    ``<id>@<source>`` so nothing is silently overwritten and the provenance
+    stays visible in the UI.
+
+    ``prefer`` decides what happens when the *same* image already has an
+    annotation with the same text: ``skip`` (default) keeps the destination's,
+    ``src`` replaces it.
+    """
+    src = snapshot(src_dir=src_dir, src_url=src_url)
+    os.makedirs(dst_dir, exist_ok=True)
+    stat = {"images": 0, "after": 0, "added": 0, "renamed": 0, "duplicate": 0}
+
+    for name in src["images"]:
+        stat["images"] += 1 if _copy_image(src["dir"] if not src_url else "", src_url, name, "", dst_dir) else 0
+    for name in src["after"]:
+        stat["after"] += 1 if _copy_image(src["dir"] if not src_url else "", src_url, name, "after", dst_dir) else 0
+
+    path = os.path.join(dst_dir, "annotations.json")
+    base = {"version": 1, "directory": os.path.basename(dst_dir), "annotations": []}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data.get("annotations"), list):
+                base = data
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    existing = base["annotations"]
+    by_id = {a.get("id"): a for a in existing}
+    seen_text = {(a.get("image"), a.get("text"), a.get("x"), a.get("y")) for a in existing}
+    tag = os.path.basename(src["dir"].rstrip("/")) or "imported"
+
+    for a in src["annotations"]:
+        key = (a.get("image"), a.get("text"), a.get("x"), a.get("y"))
+        if key in seen_text:
+            if prefer != "src":
+                stat["duplicate"] += 1
+                continue
+            existing = [b for b in existing if (b.get("image"), b.get("text"),
+                                                b.get("x"), b.get("y")) != key]
+            for b in list(by_id):
+                if by_id[b] not in existing:
+                    by_id.pop(b, None)
+        item = dict(a)
+        item.setdefault("importedFrom", tag)
+        if item.get("id") in by_id:
+            item["id"] = f"{item.get('id')}@{tag}"
+            stat["renamed"] += 1
+        existing.append(item)
+        by_id[item["id"]] = item
+        seen_text.add(key)
+        stat["added"] += 1
+
+    payload = {
+        "version": base.get("version", 1),
+        "directory": os.path.basename(dst_dir),
+        "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "annotations": existing,
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.write("\n")
+    stat["source"] = src["dir"]
+    return stat

@@ -241,6 +241,30 @@ ujshot board --read out/board --status rejected
 
 `box` 是归一化坐标（0…1），拿来定位足够。
 
+### 迁移/合并另一个板子
+
+```bash
+# 从磁盘（板子没在跑）
+ujshot board --import old-board --into out/board
+
+# 从正在跑的板子导入：带上浏览器里尚未保存的批注
+ujshot board --import-url http://127.0.0.1:8765 --into out/board \
+  --push http://127.0.0.1:8766
+```
+
+做的是：复制 `<源>/` 与 `<源>/after/` 的全部图片（同名不覆盖），把人工批注并入
+目标 `annotations.json`，`--push` 再让已打开的板子立刻刷新。
+
+| 行为 | 说明 |
+|---|---|
+| 批注 id 冲突 | 两个板子都从 `U1` 起，同 id 但内容不同 → 重命名为 `U11@<源目录名>`；**不静默覆盖** |
+| 同图同文案同坐标 | 视为重复，默认跳过（`--prefer src` 可改为用来源的） |
+| 来源标记 | 每条导入补 `importedFrom: <源目录名>`，板子里看得到出处 |
+| 图片 | 已存在就跳过，不覆盖目标板已经看过的图 |
+
+`--import-url` 比 `--import` 更准：`/api/state` 返回的是页面当前内容，磁盘上的
+`annotations.json` 只有已落盘的。
+
 ---
 
 ## 已知限制

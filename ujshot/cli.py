@@ -56,6 +56,8 @@ def main(argv=None) -> int:
     p_run.add_argument("--board-dir", help="同时把截图灌进评审板目录")
     p_run.add_argument("--board-as-after", action="store_true", help="灌进 <board-dir>/after/")
     p_run.add_argument("--board-baseline", help="改前图目录（配合 --board-as-after）")
+    p_run.add_argument("--board-round", metavar="BUILD",
+                       help="改后图放进 after/<BUILD>/ 这一轮（默认取 App 的构建号；传 none 退回 after/ 根目录）")
     p_run.add_argument("--board-script", help="评审板脚本路径（外部工具）")
     p_run.add_argument("--serve", action="store_true", help="跑完顺便起评审板")
     p_run.add_argument("--serve-port", type=int, help="评审板首选端口（默认取配置）")
@@ -85,6 +87,8 @@ def main(argv=None) -> int:
     p_board.add_argument("--side", choices=["before", "after"], default="after",
                          help="配合 --set-version：标记改前还是改后（默认 after）")
     p_board.add_argument("--image", help="配合 --set-version：只标这一张（默认整批）")
+    p_board.add_argument("--round", metavar="BUILD",
+                         help="配合 --set-version：这一轮（after/<BUILD>/）的版本标签")
     p_board.add_argument("--fixes", metavar="DIR",
                          help="按批注列出「哪个问题修于哪个版本」，看一张图跨版本修复的情况")
 
@@ -233,18 +237,31 @@ def _cmd_run(args) -> int:
 
     if args.board_dir:
         bdir = board.prepare(os.path.abspath(args.board_dir))
+        # 改后图默认按构建号分轮（after/234/）：同一问题修了两次时，
+        # 第二轮不会把第一轮的截图覆盖掉。--board-round 可显式指定，
+        # 传 "" / "none" 则退回老布局（直接放 after/ 根目录）。
+        round_build = ""
+        if args.board_as_after:
+            if args.board_round is not None:
+                round_build = "" if args.board_round in ("", "none") else args.board_round
+            elif version["build"]:
+                round_build = version["build"]
         placed, seeded = board.copy_shots(
             bdir, outdir, result.shots, as_after=args.board_as_after,
-            baseline_dir=args.board_baseline, before_map=fl.before_map)
+            baseline_dir=args.board_baseline, before_map=fl.before_map,
+            round_build=round_build)
         count = board.write_annotations(bdir, result.shots, as_after=args.board_as_after,
                                         when=meta["when"])
         # 版本跟着图一起进板子：不然过两天就没人知道这批是哪个 Build
         side = "after" if args.board_as_after else "before"
         if version["label"]:
-            board.write_versions(bdir, side, version["label"])
+            board.write_versions(bdir, side, version["label"], round_build=round_build)
             print(f"  版本 → {side}: {version['label']}（写进 versions.json）")
         print(f"评审板：{bdir}")
-        print(f"  放下 {len(placed)} 张 → {'after/' if args.board_as_after else '根目录'}")
+        dest_label = "根目录"
+        if args.board_as_after:
+            dest_label = f"after/{round_build}/" if round_build else "after/"
+        print(f"  放下 {len(placed)} 张 → {dest_label}")
         if seeded:
             print(f"  基线图 {len(seeded)} 张 ← {args.board_baseline}")
         print(f"  写入 {count} 条自动批注（source=ujshot，重跑覆盖上一轮）")

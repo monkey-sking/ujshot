@@ -246,6 +246,7 @@ ujshot board --set-version "0.1.0 (236)" --side after --image old.png --into out
 ```
 <board-dir>/                  # 改前图
 <board-dir>/after/            # 改后图（同名才能并排对比）
+<board-dir>/after/<build>/    # 同一问题修了多轮：一轮一个目录
 <board-dir>/annotations.json  # {"version":1,"annotations":[...]}
 ```
 
@@ -260,11 +261,40 @@ ujshot run --flow smoke \
 |---|---|
 | `--board-dir` | 把截图灌进板子目录 |
 | `--board-as-after` | 进 `after/`（改名后图） |
+| `--board-round` | 进 `after/<build>/`；默认取 App 的构建号，`none` 退回 `after/` 根目录 |
 | `--board-baseline` | 改前图目录，按流程的 `beforeMap` 配对 |
 | `--board-script` | 板子程序；`--serve` 时用它起服务 |
 | `--serve` | 起板子并打印地址 |
 
 自动批注带 `source: "ujshot"`，**重跑只替换自己那批，不动人的批注**。
+
+### 一个原始问题修了好几轮
+
+第一轮修完人不满意、退回重做，第二轮不能把第一轮的截图覆盖掉，否则"上轮到底改成什么样"
+永久丢失。所以改后图按构建号分轮放：
+
+```
+after/234/01-fab.png     ← 第一轮
+after/235/01-fab.png     ← 第二轮（第一轮原样留着）
+```
+
+```
+--board-round 234    # 显式指定
+--board-round none   # 不分轮，仍放 after/ 根目录（老布局）
+```
+
+不给 `--board-round` 时用装着的 App 的 `CFBundleVersion`（如 `237`）作轮次名；
+读不到就不分轮。版本标签同时写进 `versions.json` 的 `rounds`：`{"234": "0.1.0 (234)"}`。
+
+每条批注可以带自己的轮次结论，一轮一套，互不覆盖：
+
+```json
+{"id": "U41", "image": "live-215844.png", "status": "fixed",
+ "rounds": [{"build": "234", "status": "rejected", "rejectReason": "还在显示这个块"},
+            {"build": "235", "status": "fixed"}]}
+```
+
+`status` 仍是这条批注的最新结论（顶部统计、列表筛选看它），`rounds` 只负责记历史。
 
 反向读人标的：
 
@@ -286,7 +316,7 @@ ujshot board --import-url http://127.0.0.1:8765 --into out/board \
   --push http://127.0.0.1:8766
 ```
 
-做的是：复制 `<源>/` 与 `<源>/after/` 的全部图片（同名不覆盖），把人工批注并入
+做的是：复制 `<源>/` 与 `<源>/after/**` 的全部图片（同名不覆盖，分轮目录原样保留），把人工批注并入
 目标 `annotations.json`，`--push` 再让已打开的板子立刻刷新。
 
 | 行为 | 说明 |

@@ -47,13 +47,19 @@ def prepare(board_dir: str) -> str:
 
 
 def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
-               baseline_dir=None, before_map=None):
+               baseline_dir=None, before_map=None, round_build=""):
     """Copy this run's screenshots into the board layout.
 
     Both sides must share file names or the board cannot pair them, so the name
     is always the flow's shot id — never the original file name.
+
+    ``round_build`` puts the after images in their own round directory
+    (``after/234/``): the same issue fixed twice keeps both attempts instead of
+    the second run overwriting the first.
     """
     dest = os.path.join(board_dir, "after") if as_after else board_dir
+    if as_after and round_build:
+        dest = os.path.join(dest, round_build)
     os.makedirs(dest, exist_ok=True)
     placed, seeded = [], []
     for s in shots:
@@ -268,14 +274,19 @@ def push_annotations(url: str, board_dir: str) -> bool:
         return False
 
 
-def write_versions(board_dir: str, side: str, label: str, image: str = "") -> dict:
+def write_versions(board_dir: str, side: str, label: str, image: str = "",
+                   round_build: str = "") -> dict:
     """Record which build a batch of screenshots came from.
 
     Versions live beside the annotations, not inside them: clearing annotations
     must not erase "this was Build 237". ``image`` targets a single exception.
+
+    With ``round_build`` the label is also filed under ``rounds`` — after images
+    now live in ``after/<build>/``, so each round needs its own label.
     """
     path = os.path.join(board_dir, VERSIONS_NAME)
-    data = {"before": "", "after": "", "overrides": {"before": {}, "after": {}}}
+    data = {"before": "", "after": "",
+            "overrides": {"before": {}, "after": {}}, "rounds": {}}
     if os.path.exists(path):
         try:
             with open(path, encoding="utf-8") as f:
@@ -288,6 +299,9 @@ def write_versions(board_dir: str, side: str, label: str, image: str = "") -> di
                         "before": dict(ov.get("before") or {}),
                         "after": dict(ov.get("after") or {}),
                     }
+                rounds = raw.get("rounds") or {}
+                if isinstance(rounds, dict):
+                    data["rounds"] = {str(k): str(v) for k, v in rounds.items()}
         except (OSError, json.JSONDecodeError):
             pass
     if side not in ("before", "after"):
@@ -296,6 +310,8 @@ def write_versions(board_dir: str, side: str, label: str, image: str = "") -> di
         data["overrides"].setdefault(side, {})[image] = label
     else:
         data[side] = label
+    if round_build and side == "after":
+        data["rounds"][round_build] = label
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
         f.write("\n")
@@ -342,8 +358,53 @@ def snapshot(src_dir: str = "", src_url: str = ""):
                       and n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
                       and not n.startswith("."))
 
-    return {"dir": os.path.abspath(src_dir), "images": _imgs(), "after": _imgs("after"),
-            "annotations": anns}
+    rounds = []
+    if src_url:
+        for r in data.get("afterRounds") or []:
+            rounds.append({"build": r.get("build", ""), "images": r.get("images") or []})
+    else:
+        after_dir = os.path.join(src_dir, "after")
+        flat = _imgs("after")
+        if flat:
+            rounds.append({"build": "", "images": flat})
+        if os.path.isdir(after_dir):
+            for name in sorted(os.listdir(after_dir)):
+                sub = os.path.join(after_dir, name)
+                if os.path.isdir(sub) and not name.startswith("."):
+                    imgs = _imgs(os.path.join("after", name))
+                    if imgs:
+                        rounds.append({"build": name, "images": imgs})
+
+    after_all = []
+    for r in rounds:
+        for n in r["images"]:
+            if n not in after_all:
+                after_all.append(n)
+    return {"dir": os.path.abspath(src_dir), "images": _imgs(), "after": after_all,
+            "rounds": rounds, "annotations": anns}
+
+
+def _copy_round_image(src_dir, src_url, name, build, dst_dir):
+    dst = os.path.join(dst_dir, "after", build, name) if build \
+        else os.path.join(dst_dir, "after", name)
+    if os.path.exists(dst):
+        return False
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if src_url:
+        prefix = "/after/" + (urllib.parse.quote(build) + "/" if build else "")
+        try:
+            data = _http_get(src_url.rstrip("/") + prefix + urllib.parse.quote(name))
+        except Exception:
+            return False
+        with open(dst, "wb") as f:
+            f.write(data)
+        return True
+    src = os.path.join(src_dir, "after", build, name) if build \
+        else os.path.join(src_dir, "after", name)
+    if not os.path.exists(src):
+        return False
+    shutil.copy2(src, dst)
+    return True
 
 
 def _copy_image(src_dir, src_url, name, sub, dst_dir):
@@ -385,8 +446,10 @@ def merge(src_dir: str, dst_dir: str, src_url: str = "", prefer: str = "skip"):
 
     for name in src["images"]:
         stat["images"] += 1 if _copy_image(src["dir"] if not src_url else "", src_url, name, "", dst_dir) else 0
-    for name in src["after"]:
-        stat["after"] += 1 if _copy_image(src["dir"] if not src_url else "", src_url, name, "after", dst_dir) else 0
+    for r in src.get("rounds") or []:
+        for name in r["images"]:
+            stat["after"] += 1 if _copy_round_image(
+                src["dir"] if not src_url else "", src_url, name, r["build"], dst_dir) else 0
 
     path = os.path.join(dst_dir, "annotations.json")
     base = {"version": 1, "directory": os.path.basename(dst_dir), "annotations": []}

@@ -594,6 +594,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
     border: none; background: transparent; color: var(--muted);
     border-radius: 999px; padding: 3px 9px; font-size: 11px; font-weight: 600;
     font-variant-numeric: tabular-nums; cursor: pointer;
+    white-space: nowrap; flex-shrink: 0;
     transition: background .14s var(--ease-out), color .14s var(--ease-out);
   }
   .seg .pillbtn:hover { color: var(--text); }
@@ -634,6 +635,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
   button {
     font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--border);
     background: var(--card); color: var(--text); padding: 6px 12px; font-size: 12px;
+    white-space: nowrap;
     transition: background .14s var(--ease-out), border-color .14s var(--ease-out),
                 transform .12s var(--ease-out);
   }
@@ -854,12 +856,12 @@ HTML_PAGE = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 7px;
   }
   .card.active { border-color: var(--ai); box-shadow: 0 0 0 1px rgba(45,212,191,.4); }
-  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; }
-  .card-id { font-weight: 700; display: flex; align-items: center; gap: 6px; }
-  .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 8px; font-size: 12px; }
+  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; min-width: 0; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.4; }
   .badge.ai { background: rgba(45,212,191,.16); color: var(--ai); }
   .badge.user { background: rgba(249,115,22,.18); color: var(--user); }
-  .coords { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; }
+  .coords { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; white-space: nowrap; margin-left: auto; }
   /* 轮次条：同一问题修了几轮，一行看全。未给结论的轮次只显示构建号 */
   .round-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -1px; }
   .round-chip {

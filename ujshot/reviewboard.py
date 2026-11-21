@@ -230,26 +230,34 @@ def round_sort_key(name: str) -> Tuple[int, int, str]:
     return (0, int(name), "") if re.fullmatch(r"\d+", name) else (1, 0, name)
 
 
-def list_rounds(directory: Path) -> List[Dict[str, Any]]:
-    """改后图可以分轮：after/234/、after/235/…
+APPEARANCE_DIRS = ("light", "dark")
 
-    同一个问题修了 234 不满意、235 再修，两轮的截图必须都在，
-    否则"第一轮做了什么"就永久丢了。轮次就是一个子目录：
 
-        <board>/after/*.png          ← 老布局：不分轮（build 记为空）
-        <board>/after/234/*.png      ← 第 234 版
-        <board>/after/_local/*.png   ← 本机没版本号的那批
+def list_before_images(directory: Path, appearance: str = "dark") -> List[str]:
+    """返回指定外观下的改前图列表：暗色在根目录，亮色在 light/ 子目录。"""
+    target = (directory / "light") if appearance == "light" else directory
+    return list_images(target) if target.is_dir() else []
+
+
+def list_rounds(directory: Path, appearance: str = "dark") -> List[Dict[str, Any]]:
+    """改后图可以分轮且按外观分槽：
+        暗色（默认，向后兼容）：after/<build>/*.png 或 after/*.png
+        亮色：                 after/light/<build>/*.png 或 after/light/*.png
 
     返回按轮次排好序的 [{"build", "images"}]，供前端做轮次选择。
     """
-    after = directory / "after"
+    after = (directory / "after" / "light") if appearance == "light" else (directory / "after")
     rounds: List[Dict[str, Any]] = []
     if not after.is_dir():
         return rounds
     root_imgs = list_images(after)
     if root_imgs:
         rounds.append({"build": "", "images": root_imgs})
-    subdirs = [p for p in after.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    subdirs = [
+        p for p in after.iterdir()
+        if p.is_dir() and not p.name.startswith(".")
+        and (appearance == "light" or p.name not in APPEARANCE_DIRS)
+    ]
     for sub in sorted(subdirs, key=lambda p: round_sort_key(p.name)):
         imgs = list_images(sub)
         if imgs:
@@ -752,6 +760,14 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .after-wrap { position: relative; display: inline-block; line-height: 0; border-radius: 18px; box-shadow: 0 20px 50px rgba(0,0,0,.55); cursor: crosshair; }
   .after-wrap img { display: block; max-height: calc(100vh - 128px); max-width: 100%; border-radius: 18px; pointer-events: none; }
   .after-wrap.zoom100 img { max-height: none; width: 402px; }
+  .missing-shot {
+    width: 260px; height: min(560px, calc(100vh - 140px));
+    border-radius: 18px; border: 1.5px dashed var(--border);
+    background: rgba(255,255,255,.02);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 8px; padding: 20px; text-align: center; color: var(--muted); font-size: 12.5px; line-height: 1.5;
+  }
+  .missing-shot strong { color: var(--text); font-size: 13px; }
   .ai-reply-box {
     background: rgba(45,212,191,.09); border: 1px solid rgba(45,212,191,.28);
     border-left: 3px solid var(--ai);
@@ -856,8 +872,9 @@ HTML_PAGE = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 7px;
   }
   .card.active { border-color: var(--ai); box-shadow: 0 0 0 1px rgba(45,212,191,.4); }
-  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: nowrap; gap: 6px; font-size: 12px; }
-  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: nowrap; gap: 4px; flex-shrink: 0; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; }
+  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; max-width: 100%; }
+  .card-id > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
   .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.4; }
   .badge.ai { background: rgba(45,212,191,.16); color: var(--ai); }
   .badge.user { background: rgba(249,115,22,.18); color: var(--user); }
@@ -947,6 +964,10 @@ HTML_PAGE = r"""<!DOCTYPE html>
       <button id="modeOperateBtn" onclick="setBoardMode('operate')">🖐 操作</button>
       <button id="modeAnnotateBtn" class="active" onclick="setBoardMode('annotate')">✏️ 批注</button>
     </div>
+    <div class="seg" id="appearanceSeg" title="一键切换暗色 / 亮色截图，不混排">
+      <button class="pillbtn active" id="appDarkBtn" onclick="setAppearance('dark')">🌙 暗色</button>
+      <button class="pillbtn" id="appLightBtn" onclick="setAppearance('light')">☀️ 亮色</button>
+    </div>
     <div class="seg" id="statusSeg">
       <button class="pillbtn" id="pillOpen" data-filter="open" onclick="toggleStatusFilter('open')" title="待处理">待处理 0</button>
       <button class="pillbtn" id="pillFixed" data-filter="fixed" onclick="toggleStatusFilter('fixed')" title="待验收">待验收 0</button>
@@ -1000,6 +1021,7 @@ HTML_PAGE = r"""<!DOCTYPE html>
           <img id="afterImg" alt="after screenshot" />
           <div class="overlay" id="afterOverlay"></div>
         </div>
+        <div class="missing-shot" id="afterMissing" style="display:none;"></div>
       </div>
     </div>
     <div class="stage-hint" id="stageHint"></div>
@@ -1053,9 +1075,40 @@ function autoSizeTextarea(el) {
   el.style.height = Math.max(54, el.scrollHeight) + "px";
 }
 let compareMode = true;
+let currentAppearance = "dark";
 let pendingDraft = null;
 let dragStart = null;
 let draftEl = null;
+
+function appearanceOf(a) {
+  return (a && a.appearance === "light") ? "light" : "dark";
+}
+function beforeImagesFor(app) {
+  const mode = app || currentAppearance;
+  return mode === "light" ? (state.lightImages || []) : (state.images || []);
+}
+function afterRoundsFor(app) {
+  const mode = app || currentAppearance;
+  return mode === "light" ? (state.lightAfterRounds || []) : (state.afterRounds || []);
+}
+function afterImagesFor(app) {
+  const mode = app || currentAppearance;
+  return mode === "light" ? (state.lightAfterImages || []) : (state.afterImages || []);
+}
+function setAppearance(app) {
+  const next = (app === "light") ? "light" : "dark";
+  if (currentAppearance === next) return;
+  currentAppearance = next;
+  selectedId = null;
+  closePopover();
+  const names = allImageNames(currentAppearance);
+  if (names.length && !names.includes(currentImage)) {
+    currentImage = names[0];
+  } else if (!names.length) {
+    currentImage = null;
+  }
+  render();
+}
 
 async function init() {
   const res = await fetch(api("/api/state"));
@@ -1070,7 +1123,11 @@ async function init() {
   // 版本标签本身就是入口：点一下直接改，不额外挂「✏️ 版本」按钮
   const bar = document.getElementById("verBar");
   if (bar) { bar.onclick = editVersions; bar.title = "点击设置改前/改后各是哪个 Build"; }
-  if (state.images.length > 0) currentImage = state.images[0];
+  const darkNames = allImageNames("dark");
+  const lightNames = allImageNames("light");
+  if (!darkNames.length && lightNames.length) currentAppearance = "light";
+  const initialNames = allImageNames(currentAppearance);
+  if (initialNames.length > 0 && !initialNames.includes(currentImage)) currentImage = initialNames[0];
   render();
 }
 
@@ -1206,48 +1263,59 @@ function onImageSearch(v) {
 
 function imageMatches(img) {
   if (statusFilter) {
-    const anns = state.annotations.filter(a => a.image === img);
+    const anns = state.annotations.filter(a => a.image === img && appearanceOf(a) === currentAppearance);
     if (!anns.some(a => bucketOf(a) === statusFilter)) return false;
   }
   if (imageQuery) {
-    const anns = state.annotations.filter(a => a.image === img);
+    const anns = state.annotations.filter(a => a.image === img && appearanceOf(a) === currentAppearance);
     const hay = (img + " " + anns.map(a => (a.text || "") + " " + (a.id || "")).join(" ")).toLowerCase();
     if (!hay.includes(imageQuery)) return false;
   }
   return true;
 }
 
-// 文件名 → 有哪些版本。之前只列 before，导致"只有改后"的图在左栏根本点不到。
-function pairState(img) {
-  const hasBefore = state.images.includes(img);
-  const hasAfter = (state.afterImages || []).includes(img);
+// 文件名 → 当前外观下有哪些版本。暗色与亮色彻底分槽，不再左右混排。
+function pairState(img, app) {
+  const mode = app || currentAppearance;
+  const hasBefore = beforeImagesFor(mode).includes(img);
+  const hasAfter = afterImagesFor(mode).includes(img);
   return { hasBefore, hasAfter };
 }
 
 // ---- 改后图分轮：同一个问题修了 234 不满意、235 再修，两轮截图都要在
-// after/234/、after/235/ 各是一个轮次；老布局直接放 after/ 根目录 = 不分轮（build 为空）
+// 暗色：after/234/、after/235/；亮色：after/light/234/、after/light/235/
 let selectedRound = {};   // 图名 → 当前在看哪一轮
 
-function roundsFor(img) {
+function roundsFor(img, app) {
+  const mode = app || currentAppearance;
   const out = [];
-  for (const r of (state.afterRounds || [])) {
+  for (const r of afterRoundsFor(mode)) {
     if ((r.images || []).includes(img)) out.push(r.build || "");
   }
   return out;
 }
 
-function roundBuild(img) {
-  const rs = roundsFor(img);
+function roundBuild(img, app) {
+  const rs = roundsFor(img, app);
   if (!rs.length) return "";
   if (selectedRound[img] !== undefined && rs.includes(selectedRound[img])) return selectedRound[img];
   return rs[rs.length - 1];     // 默认看最新一轮
 }
 
-function afterUrl(img, bust) {
-  const b = roundBuild(img);
+function beforeUrl(img, app) {
+  const mode = app || currentAppearance;
+  return mode === "light"
+    ? api(`/images/light/${encodeURIComponent(img)}`)
+    : api(`/images/${encodeURIComponent(img)}`);
+}
+
+function afterUrl(img, bust, app) {
+  const mode = app || currentAppearance;
+  const b = roundBuild(img, mode);
+  const appSeg = mode === "light" ? "light/" : "";
   const path = b
-    ? api(`/after/${encodeURIComponent(b)}/${encodeURIComponent(img)}`)
-    : api(`/after/${encodeURIComponent(img)}`);
+    ? api(`/after/${appSeg}${encodeURIComponent(b)}/${encodeURIComponent(img)}`)
+    : api(`/after/${appSeg}${encodeURIComponent(img)}`);
   return bust ? `${path}?t=${Date.now()}` : path;
 }
 
@@ -1313,21 +1381,24 @@ function raisedInOf(a) {
   return "";
 }
 
-function hasRoundImage(img, build) {
+function hasRoundImage(img, build, app) {
   if (!build) return false;
-  return (state.afterRounds || []).some(r => String(r.build) === String(build) && (r.images || []).includes(img));
+  const mode = app || currentAppearance;
+  return afterRoundsFor(mode).some(r => String(r.build) === String(build) && (r.images || []).includes(img));
 }
 
-function urlForBuild(img, build, fallbackSide, bust) {
+function urlForBuild(img, build, fallbackSide, bust, app) {
+  const mode = app || currentAppearance;
+  const appSeg = mode === "light" ? "light/" : "";
   let path;
-  if (build && hasRoundImage(img, build)) {
-    path = api(`/after/${encodeURIComponent(build)}/${encodeURIComponent(img)}`);
-  } else if (fallbackSide === "after" && (state.afterImages || []).includes(img)) {
-    return afterUrl(img, bust);
-  } else if (state.images.includes(img)) {
-    path = api(`/images/${encodeURIComponent(img)}`);
+  if (build && hasRoundImage(img, build, mode)) {
+    path = api(`/after/${appSeg}${encodeURIComponent(build)}/${encodeURIComponent(img)}`);
+  } else if (fallbackSide === "after" && afterImagesFor(mode).includes(img)) {
+    return afterUrl(img, bust, mode);
+  } else if (beforeImagesFor(mode).includes(img)) {
+    path = beforeUrl(img, mode);
   } else {
-    return afterUrl(img, bust);
+    return afterUrl(img, bust, mode);
   }
   return bust ? `${path}?t=${Date.now()}` : path;
 }
@@ -1342,59 +1413,82 @@ function verLabelForBuild(img, build, fallbackSide) {
   return verOf(img, fallbackSide);
 }
 
-// 舞台左栏 =「提出问题的版本图」，右栏 =「修复问题的版本图」
-function stageBuildsFor(img) {
-  const anns = state.annotations.filter(a => a.image === img && matchesFilter(a));
-  const allAnns = state.annotations.filter(a => a.image === img);
+// 舞台左栏 =「提出问题的版本图」，右栏 =「修复问题的版本图」（严格限定在当前外观内）
+function stageBuildsFor(img, app) {
+  const mode = app || currentAppearance;
+  const allAnns = state.annotations.filter(a => a.image === img && appearanceOf(a) === mode);
+  const anns = allAnns.filter(matchesFilter);
   const focus = (selectedId && allAnns.find(a => a.id === selectedId)) || anns[0] || allAnns[0] || null;
-  const rs = roundsFor(img);
+  const rs = roundsFor(img, mode);
   if (focus && (raisedInOf(focus) || fixedInOf(focus))) {
     const leftB = raisedInOf(focus) || (rs.length ? rs[0] : buildNoOf(verOf(img, "before")));
     let rightB = "";
+    let missingRightBuild = "";
     if (selectedRound[img] !== undefined && rs.includes(selectedRound[img]) && String(selectedRound[img]) !== String(leftB)) {
       rightB = selectedRound[img];
     } else {
       const fb = fixedInOf(focus);
-      if (fb && hasRoundImage(img, fb)) {
+      if (fb && hasRoundImage(img, fb, mode)) {
         rightB = fb;
+      } else if (fb) {
+        // 明确记录了修复版本，但该版本下尚无当前外观截图：给缺失占位，不拿另一外观顶替
+        missingRightBuild = fb;
       } else {
         const newer = rs.filter(b => Number(b) > Number(leftB));
         if (newer.length) rightB = newer[newer.length - 1];
       }
     }
-    const hasLeft = Boolean((leftB && hasRoundImage(img, leftB)) || state.images.includes(img));
-    const hasRight = Boolean(rightB && String(rightB) !== String(leftB) && hasRoundImage(img, rightB));
-    return { focus, leftBuild: leftB, rightBuild: rightB, hasLeft, hasRight };
+    const hasLeft = Boolean((leftB && hasRoundImage(img, leftB, mode)) || beforeImagesFor(mode).includes(img));
+    const hasRight = Boolean(rightB && String(rightB) !== String(leftB) && hasRoundImage(img, rightB, mode));
+    return { focus, leftBuild: leftB, rightBuild: rightB, missingRightBuild, hasLeft, hasRight };
   }
-  const pair = pairState(img);
+  const pair = pairState(img, mode);
   const leftB = pair.hasBefore ? buildNoOf(verOf(img, "before")) : (rs[0] || "");
-  const rightB = roundBuild(img);
+  const rightB = roundBuild(img, mode);
   const hasLeft = pair.hasBefore;
   const hasRight = pair.hasAfter && (!hasLeft || !rightB || String(rightB) !== String(leftB));
-  return { focus, leftBuild: leftB, rightBuild: rightB, hasLeft, hasRight };
+  return { focus, leftBuild: leftB, rightBuild: rightB, missingRightBuild: "", hasLeft, hasRight };
 }
 
-function fixBuildsOf(img) {
-  const list = state.annotations.filter(a => a.image === img).map(fixedInOf).filter(Boolean);
+function fixBuildsOf(img, app) {
+  const mode = app || currentAppearance;
+  const list = state.annotations.filter(a => a.image === img && appearanceOf(a) === mode).map(fixedInOf).filter(Boolean);
   return [...new Set(list)].sort((a, b) => Number(a) - Number(b));
 }
 
-function allImageNames() {
+function allImageNames(app) {
+  const mode = app || currentAppearance;
   const seen = new Set();
   const out = [];
-  for (const n of state.images) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
-  for (const n of (state.afterImages || [])) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
+  for (const n of beforeImagesFor(mode)) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
+  for (const n of afterImagesFor(mode)) { if (!seen.has(n)) { seen.add(n); out.push(n); } }
   return out;
 }
 
 function render() {
+  const darkCount = allImageNames("dark").length;
+  const lightCount = allImageNames("light").length;
+  const appDarkBtn = document.getElementById("appDarkBtn");
+  const appLightBtn = document.getElementById("appLightBtn");
+  if (appDarkBtn) {
+    appDarkBtn.textContent = darkCount ? `🌙 暗色 ${darkCount}` : "🌙 暗色";
+    appDarkBtn.classList.toggle("active", currentAppearance === "dark");
+    appDarkBtn.classList.toggle("zero", darkCount === 0);
+  }
+  if (appLightBtn) {
+    appLightBtn.textContent = lightCount ? `☀️ 亮色 ${lightCount}` : "☀️ 亮色";
+    appLightBtn.classList.toggle("active", currentAppearance === "light");
+    appLightBtn.classList.toggle("zero", lightCount === 0);
+  }
+
+  const appAnns = state.annotations.filter(a => appearanceOf(a) === currentAppearance);
   const counts = {
-    open: state.annotations.filter(a => bucketOf(a) === "open").length,
-    fixed: state.annotations.filter(a => bucketOf(a) === "fixed").length,
-    accepted: state.annotations.filter(a => bucketOf(a) === "accepted").length,
-    rejected: state.annotations.filter(a => bucketOf(a) === "rejected").length,
-    discussed: state.annotations.filter(a => bucketOf(a) === "discussed").length,
-    ignored: state.annotations.filter(a => bucketOf(a) === "ignored").length
+    open: appAnns.filter(a => bucketOf(a) === "open").length,
+    fixed: appAnns.filter(a => bucketOf(a) === "fixed").length,
+    accepted: appAnns.filter(a => bucketOf(a) === "accepted").length,
+    rejected: appAnns.filter(a => bucketOf(a) === "rejected").length,
+    discussed: appAnns.filter(a => bucketOf(a) === "discussed").length,
+    ignored: appAnns.filter(a => bucketOf(a) === "ignored").length
   };
   for (const [key, elId] of [["open", "pillOpen"], ["fixed", "pillFixed"],
                              ["accepted", "pillAccepted"], ["rejected", "pillRejected"],
@@ -1416,9 +1510,10 @@ function render() {
   document.getElementById("canvasWrap").classList.toggle("zoom100", zoom100);
   document.getElementById("afterWrap").classList.toggle("zoom100", zoom100);
 
-  // 提出问题的版本图 vs 修复问题的版本图：跟着当前选中的批注走
-  const sb = stageBuildsFor(currentImage);
-  const both = sb.hasLeft && sb.hasRight;
+  // 提出问题的版本图 vs 修复问题的版本图：严格限定在当前外观内
+  const sb = currentImage ? stageBuildsFor(currentImage) : { focus: null, leftBuild: "", rightBuild: "", missingRightBuild: "", hasLeft: false, hasRight: false };
+  const hasRightSlot = sb.hasRight || Boolean(sb.missingRightBuild);
+  const both = sb.hasLeft && hasRightSlot;
   const cmpBtn = document.getElementById("compareBtn");
   cmpBtn.style.display = both ? "inline-block" : "none";
   cmpBtn.classList.toggle("active", both && compareMode);
@@ -1429,54 +1524,82 @@ function render() {
   const afterColEl = document.getElementById("afterCol");
   const afterLabel = document.getElementById("afterLabel");
   const afterImg = document.getElementById("afterImg");
+  const afterWrap = document.getElementById("afterWrap");
+  const afterMissing = document.getElementById("afterMissing");
 
   const showBeforeCol = sb.hasLeft;
-  const showAfterCol = sb.hasRight && (!both || showCompare);
+  const showAfterCol = hasRightSlot && (!both || showCompare);
   beforeCol.style.display = showBeforeCol ? "flex" : "none";
   afterColEl.style.display = showAfterCol ? "flex" : "none";
 
   const leftWord = sb.focus ? "提出问题" : "改前";
   const rightWord = sb.focus ? "修复问题" : "改后";
+  const modeCn = currentAppearance === "light" ? "亮色" : "暗色";
   if (both) {
     const vb = verLabelForBuild(currentImage, sb.leftBuild, "before");
-    const va = verLabelForBuild(currentImage, sb.rightBuild, "after");
+    const va = verLabelForBuild(currentImage, sb.rightBuild || sb.missingRightBuild, "after");
     beforeLabel.style.display = "flex";
     beforeLabel.innerHTML = `${leftWord}${vb ? `<span class="ver">${vb}</span>` : ""}`;
     afterLabel.innerHTML = `${rightWord}${va ? `<span class="ver">${va}</span>` : ""}`;
-    if (showCompare) afterImg.src = urlForBuild(currentImage, sb.rightBuild, "after", true);
-    else afterImg.removeAttribute("src");
+    if (sb.hasRight && showCompare) {
+      afterWrap.style.display = "inline-block";
+      if (afterMissing) afterMissing.style.display = "none";
+      afterImg.src = urlForBuild(currentImage, sb.rightBuild, "after", true);
+    } else if (sb.missingRightBuild && showCompare) {
+      afterWrap.style.display = "none";
+      afterImg.removeAttribute("src");
+      if (afterMissing) {
+        afterMissing.style.display = "flex";
+        afterMissing.innerHTML = `<strong>${va || ("Build " + sb.missingRightBuild)}</strong>`
+          + `<span>暂无${modeCn}修复图</span>`
+          + `<span style="font-size:11px;opacity:.75">补拍请运行：<br/>ujshot run --appearance ${currentAppearance} --board-as-after</span>`;
+      }
+    } else {
+      afterWrap.style.display = "none";
+      if (afterMissing) afterMissing.style.display = "none";
+      afterImg.removeAttribute("src");
+    }
   } else if (sb.hasLeft) {
     const vb = verLabelForBuild(currentImage, sb.leftBuild, "before");
     beforeLabel.style.display = "flex";
     beforeLabel.innerHTML = `${leftWord}${vb ? `<span class="ver">${vb}</span>` : ""}`;
+    afterWrap.style.display = "none";
+    if (afterMissing) afterMissing.style.display = "none";
     afterImg.removeAttribute("src");
-  } else {
+  } else if (sb.hasRight) {
     const va = verLabelForBuild(currentImage, sb.rightBuild, "after");
     beforeLabel.style.display = "none";
     afterLabel.innerHTML = `${rightWord}${va ? `<span class="ver">${va}</span>` : ""}`;
+    afterWrap.style.display = "inline-block";
+    if (afterMissing) afterMissing.style.display = "none";
     afterImg.src = urlForBuild(currentImage, sb.rightBuild, "after", true);
+  } else {
+    beforeLabel.style.display = "none";
+    afterWrap.style.display = "none";
+    if (afterMissing) afterMissing.style.display = "none";
+    afterImg.removeAttribute("src");
   }
 
   const listEl = document.getElementById("imageList");
   listEl.innerHTML = "";
-  allNames = allImageNames();
+  allNames = allImageNames(currentAppearance);
   const batchBefore = (state.versions || {}).before || "";
   const batchAfter = (state.versions || {}).after || "";
   let shown = 0;
   for (const img of allNames) {
     if (!imageMatches(img)) continue;
     shown++;
-    const anns = state.annotations.filter(a => a.image === img);
-    const pr = pairState(img);
+    const anns = state.annotations.filter(a => a.image === img && appearanceOf(a) === currentAppearance);
+    const pr = pairState(img, currentAppearance);
 
     // 两图并排已经说明"有对照"，不再加「改前 + 改后」文字标签
     const thumbs = pr.hasBefore && pr.hasAfter
       ? `<div class="thumb-pair">
-           <img src="${api(`/images/${encodeURIComponent(img)}`)}" loading="lazy" alt="改前" />
-           <img src="${afterUrl(img)}" loading="lazy" alt="改后" />
+           <img src="${beforeUrl(img, currentAppearance)}" loading="lazy" alt="改前" />
+           <img src="${afterUrl(img, false, currentAppearance)}" loading="lazy" alt="改后" />
          </div>`
       : `<div class="thumb-pair">
-           <img class="${pr.hasAfter ? "only" : ""}" src="${pr.hasBefore ? api(`/images/${encodeURIComponent(img)}`) : afterUrl(img)}" loading="lazy" alt="${pr.hasBefore ? "改前" : "改后"}" />
+           <img class="${pr.hasAfter ? "only" : ""}" src="${pr.hasBefore ? beforeUrl(img, currentAppearance) : afterUrl(img, false, currentAppearance)}" loading="lazy" alt="${pr.hasBefore ? "改前" : "改后"}" />
          </div>`;
 
     // 第二行只放"布局解释不了"的东西：状态点 + 数量，必要时补版本/修复跨度
@@ -1583,7 +1706,7 @@ function render() {
     else hintEl.textContent = "只有改前";
   }
   // 隐藏列的图不参与命中测试：否则点隐藏区会落在看不见的图上
-  document.getElementById("afterWrap").style.pointerEvents = showAfterCol ? "auto" : "none";
+  document.getElementById("afterWrap").style.pointerEvents = (sb.hasRight && showAfterCol) ? "auto" : "none";
   document.getElementById("canvasWrap").style.pointerEvents = showBeforeCol ? "auto" : "none";
 
   renderOverlay();
@@ -1595,9 +1718,10 @@ function renderOverlay() {
   const ovAfter = document.getElementById("afterOverlay");
   ovBefore.innerHTML = "";
   if (ovAfter) ovAfter.innerHTML = "";
+  if (!currentImage) return;
   const sb = stageBuildsFor(currentImage);
-  const showAfterCol = sb.hasRight && (!(sb.hasLeft && sb.hasRight) || compareMode);
-  const anns = state.annotations.filter(a => a.image === currentImage && matchesFilter(a));
+  const showAfterCol = sb.hasRight && (!(sb.hasLeft && (sb.hasRight || sb.missingRightBuild)) || compareMode);
+  const anns = state.annotations.filter(a => a.image === currentImage && appearanceOf(a) === currentAppearance && matchesFilter(a));
   for (const a of anns) {
     // 标注跟着版本的图片走：只画在它被提出的那个版本图上，避免不同版本的坐标错位
     const rb = raisedInOf(a);
@@ -1637,8 +1761,8 @@ function renderCards() {
   container.innerHTML = "";
 
   const scoped = showAllScope
-    ? state.annotations
-    : state.annotations.filter(a => a.image === currentImage);
+    ? state.annotations.filter(a => appearanceOf(a) === currentAppearance)
+    : state.annotations.filter(a => a.image === currentImage && appearanceOf(a) === currentAppearance);
 
   const items = scoped.filter(matchesFilter);
 
@@ -1657,6 +1781,8 @@ function renderCards() {
     card.className = "card" + (a.id === selectedId ? " active" : "");
     card.id = "card-" + a.id;
     card.onclick = () => {
+      const app = appearanceOf(a);
+      if (app !== currentAppearance) currentAppearance = app;
       if (a.image !== currentImage) currentImage = a.image;
       delete selectedRound[a.image];
       selectedId = a.id;
@@ -2011,6 +2137,7 @@ function savePopover() {
     id,
     image: currentImage,
     target: "before",
+    appearance: currentAppearance,
     raisedIn: clickedBuild || undefined,
     author: "user",
     kind: pendingDraft.kind,
@@ -2037,12 +2164,13 @@ document.getElementById("popText").addEventListener("keydown", (e) => {
 window.addEventListener("keydown", (e) => {
   if (["TEXTAREA", "INPUT"].includes(document.activeElement.tagName)) return;
   if (e.key === "Escape") closePopover();
-  const idx = state.images.indexOf(currentImage);
-  if (e.key === "ArrowRight" && idx < state.images.length - 1) {
-    currentImage = state.images[idx + 1]; selectedId = null; closePopover(); render();
+  const navNames = allImageNames(currentAppearance);
+  const idx = navNames.indexOf(currentImage);
+  if (e.key === "ArrowRight" && idx >= 0 && idx < navNames.length - 1) {
+    currentImage = navNames[idx + 1]; selectedId = null; closePopover(); render();
   }
   if (e.key === "ArrowLeft" && idx > 0) {
-    currentImage = state.images[idx - 1]; selectedId = null; closePopover(); render();
+    currentImage = navNames[idx - 1]; selectedId = null; closePopover(); render();
   }
 });
 
@@ -2347,18 +2475,23 @@ def make_handler(registry: "BoardRegistry", sim: SimulatorController):
 
             if path == "/api/state":
                 data = load_annotations(directory)
-                rounds = list_rounds(directory)
+                rounds = list_rounds(directory, "dark")
+                light_rounds = list_rounds(directory, "light")
                 versions = load_versions(directory)
                 entry = next((b for b in registry.boards
                               if Path(b["dir"]) == directory.resolve()), {})
                 self._send_json({
                     "dir": str(directory),
                     "name": entry.get("name", ""),
-                    "images": list_images(directory),
+                    "images": list_before_images(directory, "dark"),
                     # 改后图可能有多轮（after/234/、after/235/）：这里给全部轮次，
                     # 前端要能回答"这个问题一共修了几次、每次是哪张图"。
                     "afterRounds": rounds,
                     "afterImages": after_union(rounds),
+                    # 亮色外观独立分槽（light/ 与 after/light/<build>/），与暗色不混排
+                    "lightImages": list_before_images(directory, "light"),
+                    "lightAfterRounds": light_rounds,
+                    "lightAfterImages": after_union(light_rounds),
                     "annotations": data.get("annotations", []),
                     "versions": versions,
                 })
@@ -2372,21 +2505,40 @@ def make_handler(registry: "BoardRegistry", sim: SimulatorController):
                 if ".." in name or "\\" in name or not name:
                     self.send_error(HTTPStatus.BAD_REQUEST)
                     return
-                # /after/<name>.png       → 不指定轮次：取最靠后的那一轮里有的那张
-                # /after/234/<name>.png   → 明确要第 234 版
+                # /images/<name>.png            → 暗色改前
+                # /images/light/<name>.png      → 亮色改前
+                # /after/<name>.png             → 暗色最新一轮
+                # /after/234/<name>.png         → 暗色第 234 版
+                # /after/light/<name>.png       → 亮色最新一轮
+                # /after/light/234/<name>.png   → 亮色第 234 版
                 img_path: Optional[Path] = None
                 parts = [p for p in name.split("/") if p]
-                if is_after and len(parts) == 2:
+                if is_after and len(parts) == 3 and parts[0] == "light":
+                    candidate = (base_dir / "light" / parts[1] / parts[2]).resolve()
+                    if candidate.parent.parent.parent == base_dir.resolve() and candidate.is_file():
+                        img_path = candidate
+                elif is_after and len(parts) == 2 and parts[0] == "light":
+                    for r in reversed(list_rounds(directory, "light")):
+                        candidate = (base_dir / "light" / r["build"] / parts[1]).resolve() if r["build"] \
+                            else (base_dir / "light" / parts[1]).resolve()
+                        if candidate.is_file():
+                            img_path = candidate
+                            break
+                elif is_after and len(parts) == 2:
                     candidate = (base_dir / parts[0] / parts[1]).resolve()
                     if candidate.parent.parent == base_dir.resolve() and candidate.is_file():
                         img_path = candidate
                 elif is_after and len(parts) == 1:
-                    for r in reversed(list_rounds(directory)):
+                    for r in reversed(list_rounds(directory, "dark")):
                         candidate = (base_dir / r["build"] / parts[0]).resolve() if r["build"] \
                             else (base_dir / parts[0]).resolve()
                         if candidate.is_file():
                             img_path = candidate
                             break
+                elif not is_after and len(parts) == 2 and parts[0] == "light":
+                    candidate = (base_dir / "light" / parts[1]).resolve()
+                    if candidate.parent.parent == base_dir.resolve() and candidate.is_file():
+                        img_path = candidate
                 elif len(parts) == 1:
                     candidate = (base_dir / parts[0]).resolve()
                     if candidate.parent == base_dir.resolve() and candidate.is_file():

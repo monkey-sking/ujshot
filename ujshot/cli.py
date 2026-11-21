@@ -258,19 +258,20 @@ def _cmd_run(args) -> int:
         placed, seeded = board.copy_shots(
             bdir, outdir, result.shots, as_after=args.board_as_after,
             baseline_dir=args.board_baseline, before_map=fl.before_map,
-            round_build=round_build)
+            round_build=round_build, appearance=cfg.appearance)
         count = board.write_annotations(bdir, result.shots, as_after=args.board_as_after,
-                                        when=meta["when"])
+                                        when=meta["when"], appearance=cfg.appearance)
         # 版本跟着图一起进板子：不然过两天就没人知道这批是哪个 Build
         side = "after" if args.board_as_after else "before"
         if version["label"]:
             board.write_versions(bdir, side, version["label"], round_build=round_build)
             print(f"  版本 → {side}: {version['label']}（写进 versions.json）")
         print(f"评审板：{bdir}")
-        dest_label = "根目录"
+        app_prefix = "light/" if cfg.appearance == "light" else ""
+        dest_label = app_prefix or "根目录"
         if args.board_as_after:
-            dest_label = f"after/{round_build}/" if round_build else "after/"
-        print(f"  放下 {len(placed)} 张 → {dest_label}")
+            dest_label = f"after/{app_prefix}{round_build}/" if round_build else f"after/{app_prefix}"
+        print(f"  放下 {len(placed)} 张（{cfg.appearance}） → {dest_label}")
         if seeded:
             print(f"  基线图 {len(seeded)} 张 ← {args.board_baseline}")
         print(f"  写入 {count} 条自动批注（source=ujshot，重跑覆盖上一轮）")

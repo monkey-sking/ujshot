@@ -47,7 +47,8 @@ def prepare(board_dir: str) -> str:
 
 
 def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
-               baseline_dir=None, before_map=None, round_build=""):
+               baseline_dir=None, before_map=None, round_build="",
+               appearance: str = "dark"):
     """Copy this run's screenshots into the board layout.
 
     Both sides must share file names or the board cannot pair them, so the name
@@ -56,10 +57,18 @@ def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
     ``round_build`` puts the after images in their own round directory
     (``after/234/``): the same issue fixed twice keeps both attempts instead of
     the second run overwriting the first.
+
+    ``appearance`` separates dark (default root + ``after/<build>/``) from light
+    (``light/`` + ``after/light/<build>/``) so dark and light screenshots never
+    overwrite or mix with each other.
     """
-    dest = os.path.join(board_dir, "after") if as_after else board_dir
-    if as_after and round_build:
-        dest = os.path.join(dest, round_build)
+    is_light = appearance == "light"
+    if as_after:
+        dest = os.path.join(board_dir, "after", "light") if is_light else os.path.join(board_dir, "after")
+        if round_build:
+            dest = os.path.join(dest, round_build)
+    else:
+        dest = os.path.join(board_dir, "light") if is_light else board_dir
     os.makedirs(dest, exist_ok=True)
     placed, seeded = [], []
     for s in shots:
@@ -71,19 +80,23 @@ def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
 
     if baseline_dir and os.path.isdir(baseline_dir):
         mapping = before_map or {}
+        base_dest = os.path.join(board_dir, "light") if is_light else board_dir
+        os.makedirs(base_dest, exist_ok=True)
         for s in shots:
             src_name = mapping.get(s.id, f"{s.id}.png")
             src = os.path.join(baseline_dir, src_name)
-            dst = os.path.join(board_dir, f"{s.id}.png")
+            dst = os.path.join(base_dest, f"{s.id}.png")
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.copy(src, dst)
                 seeded.append(f"{s.id}.png ← {src_name}")
     return placed, seeded
 
 
-def write_annotations(board_dir: str, shots, as_after=False, when: str = "") -> int:
+def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
+                      appearance: str = "dark") -> int:
     """Turn verdicts into board annotations. Never touches a human's entries."""
     target = "after" if as_after else "before"
+    app = "light" if appearance == "light" else "dark"
     path = os.path.join(board_dir, "annotations.json")
     base = {"version": 1, "directory": os.path.basename(board_dir), "annotations": []}
     if os.path.exists(path):
@@ -95,7 +108,10 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "") -> 
         except (OSError, json.JSONDecodeError):
             pass
 
-    kept = [a for a in base.get("annotations", []) if a.get("source") != MARK]
+    kept = [
+        a for a in base.get("annotations", [])
+        if not (a.get("source") == MARK and (a.get("appearance") or "dark") == app)
+    ]
     made = []
     for s in shots:
         expect = "、".join(s.expect)
@@ -120,7 +136,9 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "") -> 
             text += f"；OCR：{(s.text or '')[:120]}"
             status = "open"
         made.append({
-            "id": f"AI-{s.id}", "image": f"{s.id}.png", "target": target,
+            "id": f"AI-{s.id}" if app == "dark" else f"AI-{s.id}-light",
+            "image": f"{s.id}.png", "target": target,
+            "appearance": app,
             "author": "ai", "kind": "pin",
             "x": 0.5, "y": 0.06, "w": 0, "h": 0,
             "text": text, "reply": "", "status": status,
@@ -153,7 +171,9 @@ def read(board_dir: str, statuses=RELEVANT):
             continue
         rows.append({
             "id": a.get("id"), "image": a.get("image"),
-            "target": a.get("target", "before"), "author": a.get("author"),
+            "target": a.get("target", "before"),
+            "appearance": a.get("appearance", "dark"),
+            "author": a.get("author"),
             "kind": a.get("kind"), "status": a.get("status"),
             "text": a.get("text", ""), "rejectReason": a.get("rejectReason", ""),
             # 必须在剥离 aiReply 之前算，否则下游拿到的是空值
@@ -420,7 +440,7 @@ def snapshot(src_dir: str = "", src_url: str = ""):
         if os.path.isdir(after_dir):
             for name in sorted(os.listdir(after_dir)):
                 sub = os.path.join(after_dir, name)
-                if os.path.isdir(sub) and not name.startswith("."):
+                if os.path.isdir(sub) and not name.startswith(".") and name not in ("light", "dark"):
                     imgs = _imgs(os.path.join("after", name))
                     if imgs:
                         rounds.append({"build": name, "images": imgs})

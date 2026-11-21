@@ -912,17 +912,59 @@ HTML_PAGE = r"""<!DOCTYPE html>
   .popover textarea:focus, .card textarea:focus { outline: none; border-color: var(--ai); }
   .popover-row { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
   .card {
-    background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 10px;
-    display: flex; flex-direction: column; gap: 7px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 11px;
+    display: flex; flex-direction: column; gap: 8px; position: relative;
   }
+  .card.settled { opacity: .82; }
+  .card.settled:hover, .card.settled.active { opacity: 1; }
   .card.active { border-color: var(--ai); box-shadow: 0 0 0 1px rgba(45,212,191,.4); }
-  .card-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; }
-  .card-id { font-weight: 700; display: flex; align-items: center; flex-wrap: wrap; gap: 4px; min-width: 0; max-width: 100%; }
-  .card-id > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 140px; }
-  .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.4; }
-  .badge.ai { background: rgba(45,212,191,.16); color: var(--ai); }
-  .badge.user { background: rgba(249,115,22,.18); color: var(--user); }
-  .coords { font-size: 11px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, monospace; white-space: nowrap; flex-shrink: 0; margin-left: auto; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; }
+  .card-id { font-weight: 700; display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .card-id > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 135px; }
+  .card-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; margin-left: auto; }
+  .ver-meta { font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .badge { font-size: 11px; padding: 2px 7px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.35; }
+  .badge.ai { background: rgba(45,212,191,.14); color: var(--ai); }
+  /* 只读状态徽章：与可点击按钮在视觉上彻底区分（无边框、胶囊底色、不可点） */
+  .st-badge { font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 600; white-space: nowrap; flex-shrink: 0; line-height: 1.35; }
+  .st-badge.st-open, .st-badge.st-approved { background: rgba(249,115,22,.16); color: #fdba74; }
+  .st-badge.st-fixed { background: rgba(56,189,248,.16); color: #7dd3fc; }
+  .st-badge.st-accepted { background: rgba(34,197,94,.16); color: #86efac; }
+  .st-badge.st-rejected { background: rgba(239,68,68,.18); color: #fca5a5; }
+  .st-badge.st-discussed { background: rgba(168,85,247,.16); color: #d8b4fe; }
+  .st-badge.st-ignored { background: rgba(107,114,128,.2); color: #9ca3af; }
+  .note-text {
+    font-size: 13px; line-height: 1.55; color: var(--text);
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .card-actions { display: flex; gap: 6px; align-items: center; }
+  .card-actions button { flex: 1; padding: 6px 10px; font-size: 12px; font-weight: 600; border-radius: 8px; }
+  .card-actions button.btn-accept { background: rgba(34,197,94,.16); border-color: rgba(34,197,94,.45); color: #86efac; }
+  .card-actions button.btn-accept:hover { background: rgba(34,197,94,.26); }
+  .card-actions button.btn-reject { background: rgba(239,68,68,.12); border-color: rgba(239,68,68,.42); color: #fca5a5; }
+  .card-actions button.btn-reject:hover { background: rgba(239,68,68,.22); }
+  .card-actions button.btn-stop { flex: 0 0 auto; color: #fca5a5; border-color: rgba(239,68,68,.4); background: rgba(239,68,68,.08); }
+  .more-wrap { position: relative; }
+  .more-btn {
+    width: 24px; height: 24px; padding: 0; border-radius: 6px;
+    border-color: transparent; background: transparent; color: var(--muted);
+    display: inline-flex; align-items: center; justify-content: center; font-size: 14px; line-height: 1;
+  }
+  .more-btn:hover { background: rgba(255,255,255,.08); color: var(--text); border-color: transparent; }
+  .more-menu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 25;
+    min-width: 132px; padding: 4px; border-radius: 9px;
+    background: var(--panel); border: 1px solid #3b4252;
+    box-shadow: 0 14px 32px rgba(0,0,0,.6);
+    display: flex; flex-direction: column; gap: 2px;
+  }
+  .more-menu button {
+    width: 100%; text-align: left; border: none; background: transparent;
+    padding: 6px 9px; border-radius: 6px; font-size: 12px; color: var(--text);
+  }
+  .more-menu button:hover { background: var(--card); }
+  .more-menu button.danger { color: #fca5a5; }
+  .more-menu hr { border: none; border-top: 1px solid var(--border); margin: 3px 4px; }
   /* 轮次条：同一问题修了几轮，一行看全。未给结论的轮次只显示构建号 */
   .round-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -1px; }
   .round-chip {
@@ -1430,6 +1472,9 @@ document.addEventListener("click", (e) => {
   const menu = document.getElementById("boardMenu");
   if (menu && menu.style.display !== "none" && !e.target.closest(".board-switch")) {
     menu.style.display = "none";
+  }
+  if (!e.target.closest(".more-wrap")) {
+    document.querySelectorAll(".more-menu").forEach(m => { m.style.display = "none"; });
   }
 });
 
@@ -2033,9 +2078,23 @@ function renderCards() {
     return;
   }
 
+  const STATUS_TEXT = {
+    open: "待处理", approved: "待处理", fixed: "待验收",
+    accepted: "已通过", rejected: "已驳回", discussed: "待探讨", ignored: "已忽略"
+  };
+
   for (const a of items) {
+    const rb = raisedInOf(a);
+    const fb = fixedInOf(a);
+    const rounds = roundsOf(a);
+    const round = activeRound(a);
+    const curStatus = (round && round.status) || a.status || "open";
+    const curReason = (round && round.rejectReason !== undefined) ? round.rejectReason : a.rejectReason;
+    const settled = curStatus === "accepted" || curStatus === "ignored";
+    const job = activeJobForAnn(a.id);
+
     const card = document.createElement("div");
-    card.className = "card" + (a.id === selectedId ? " active" : "");
+    card.className = "card" + (a.id === selectedId ? " active" : "") + (settled ? " settled" : "");
     card.id = "card-" + a.id;
     card.onclick = () => {
       const app = appearanceOf(a);
@@ -2045,28 +2104,11 @@ function renderCards() {
       selectedId = a.id;
       render();
     };
-    const coordText = a.kind === "box"
-      ? `${Math.round(a.x*100)}%,${Math.round(a.y*100)}%`
-      : `${Math.round(a.x*100)}%,${Math.round(a.y*100)}%`;
-    const coordTip = a.kind === "box"
-      ? `框 (${Math.round(a.x*100)}%, ${Math.round(a.y*100)}% · ${Math.round(a.w*100)}×${Math.round(a.h*100)}%)`
-      : `点 (${Math.round(a.x*100)}%, ${Math.round(a.y*100)}%)`;
 
-    // 每条批注同时说清「提出于哪一版」和「修于哪一版」，缩成一枚「232 → 237」保持卡片头部一行放完
-    const rb = raisedInOf(a);
-    const fb = fixedInOf(a);
-    const rounds = roundsOf(a);
-    const round = activeRound(a);
-    const curStatus = (round && round.status) || a.status;
-    const curReason = (round && round.rejectReason !== undefined) ? round.rejectReason : a.rejectReason;
-    const settled = curStatus === "accepted" || curStatus === "ignored";
-    let verBadge = "";
-    if (rb && fb) verBadge = `<span class="badge fixed-in" title="提出于 Build ${rb} · 修于 Build ${fb}">${rb} → ${fb}</span>`;
-    else if (fb) verBadge = `<span class="badge fixed-in">修于 ${fb}</span>`;
-    else if (rb && !settled) verBadge = `<span class="badge unfixed" title="提出于 Build ${rb} · 待修复">${rb} → 待修复</span>`;
-    else if (rb) verBadge = `<span class="badge" style="background:rgba(148,163,184,.16);color:#cbd5e1;">Build ${rb}</span>`;
-    else if (!settled) verBadge = `<span class="badge unfixed">待修复</span>`;
-    // 轮次条只在单条问题确实经历了多轮修复（a.rounds >= 2）时展示，不把同屏其他问题的构建号全列出来
+    const verText = (rb && fb) ? `${rb} → ${fb}`
+      : (fb ? `修于 ${fb}` : (rb ? `Build ${rb}` : ""));
+    const imgPrefix = showAllScope ? (a.image.replace(/\.png$/i, "") + " · ") : "";
+
     const candidateRounds = rounds.length >= 2 ? rounds.map(r => String(r.build)) : [];
     const activeRightB = stageBuildsFor(a.image).rightBuild;
     const roundBar = candidateRounds.length >= 2
@@ -2083,12 +2125,56 @@ function renderCards() {
     card.innerHTML = `
       <div class="card-head">
         <div class="card-id">
-          <span>${a.id}</span>
-          <span class="badge ${a.author}">${a.author === "ai" ? "AI 发现" : "我标的问题"}</span>
-          ${verBadge}
+          <span title="${a.id}">${a.id}</span>
+          <span class="st-badge st-${curStatus}">${STATUS_TEXT[curStatus] || curStatus}</span>
+          ${a.author === "ai" ? `<span class="badge ai">AI</span>` : ""}
         </div>
-        <span class="coords" title="${coordTip}">${showAllScope ? a.image.replace(/\.png$/i, "") + " · " : ""}${coordText}</span>
+        <div class="card-right">
+          ${(imgPrefix || verText) ? `<span class="ver-meta">${imgPrefix}${verText}</span>` : ""}
+          <div class="more-wrap">
+            <button class="more-btn" title="更多操作">⋯</button>
+            <div class="more-menu" style="display:none;"></div>
+          </div>
+        </div>
       </div>${roundBar}`;
+
+    // 右上角「⋯」更多菜单：收拢编辑、低频状态切换与删除，不干扰主流程
+    const moreBtn = card.querySelector(".more-btn");
+    const moreMenu = card.querySelector(".more-menu");
+    moreBtn.onclick = (e) => {
+      e.stopPropagation();
+      const wasOpen = moreMenu.style.display === "flex";
+      document.querySelectorAll(".more-menu").forEach(m => { m.style.display = "none"; });
+      moreMenu.style.display = wasOpen ? "none" : "flex";
+    };
+    const addMenuItem = (label, fn, cls) => {
+      const btn = document.createElement("button");
+      btn.textContent = label;
+      if (cls) btn.className = cls;
+      btn.onclick = (e) => { e.stopPropagation(); moreMenu.style.display = "none"; fn(); };
+      moreMenu.appendChild(btn);
+    };
+    addMenuItem("编辑批注", () => { editingNoteIds.add(a.id); renderCards(); });
+    if (curStatus !== "open" && curStatus !== "approved") {
+      addMenuItem("重新打开（待处理）", () => { markRound(a, "approved", ""); persist(); render(); });
+    }
+    if (curStatus !== "discussed") {
+      addMenuItem("标记待探讨", () => { markRound(a, "discussed"); persist(); render(); });
+    }
+    if (curStatus !== "ignored") {
+      addMenuItem("忽略此条", () => { markRound(a, "ignored"); persist(); render(); });
+    }
+    const agMenu = selectedAgentObj();
+    if (settled && agMenu && agMenu.available && !job) {
+      addMenuItem(`派给 ${agMenu.label} 重修`, () => { dispatchAnnotations([a.id]); });
+    }
+    moreMenu.appendChild(document.createElement("hr"));
+    addMenuItem("删除批注", () => {
+      state.annotations = state.annotations.filter(x => x.id !== a.id);
+      if (selectedId === a.id) selectedId = null;
+      persist();
+      render();
+    }, "danger");
 
     // 轮次胶囊：点哪颗就把舞台、缩略图、这一行的结论一起切到那一轮
     card.querySelectorAll(".round-chip").forEach(chip => {
@@ -2100,7 +2186,7 @@ function renderCards() {
       };
     });
 
-    // 问题描述：默认平铺展示（非输入框），点「编辑」才切为自动增高输入框
+    // 问题描述：正文直接呈现，双击或从「⋯」进入编辑
     if (editingNoteIds.has(a.id) || !(a.text || "").trim()) {
       const wrap = document.createElement("div");
       wrap.className = "edit-field-wrap";
@@ -2130,68 +2216,22 @@ function renderCards() {
       card.appendChild(wrap);
       setTimeout(() => autoSizeTextarea(txt), 0);
     } else {
-      const nd = document.createElement("div");
-      nd.className = "note-display";
-      const head = document.createElement("div");
-      head.className = "note-display-head";
-      head.innerHTML = `<span>${a.author === "ai" ? "📌 AI 发现说明" : "📝 你的批注"}</span>`;
-      const editBtn = document.createElement("button");
-      editBtn.className = "mini-link";
-      editBtn.textContent = "✏️ 编辑";
-      editBtn.onclick = (e) => { e.stopPropagation(); editingNoteIds.add(a.id); renderCards(); };
-      head.appendChild(editBtn);
       const body = document.createElement("div");
+      body.className = "note-text";
       body.textContent = a.text;
-      nd.appendChild(head);
-      nd.appendChild(body);
-      card.appendChild(nd);
+      body.title = "双击可编辑";
+      body.ondblclick = (e) => { e.stopPropagation(); editingNoteIds.add(a.id); renderCards(); };
+      card.appendChild(body);
     }
 
     if (a.aiReply) {
       const box = document.createElement("div");
       box.className = "ai-reply-box";
-      box.innerHTML = `<div class="ai-reply-title"><span>🤖 AI 回复（只读）</span></div>`;
+      box.innerHTML = `<div class="ai-reply-title"><span>AI 回复</span></div>`;
       const body = document.createElement("div");
       body.textContent = a.aiReply;
       box.appendChild(body);
       card.appendChild(box);
-    }
-
-    if (curStatus === "fixed" || curStatus === "accepted" || curStatus === "rejected" || a.aiReply) {
-      const rbar = document.createElement("div");
-      rbar.className = "review-bar";
-
-      const accBtn = document.createElement("button");
-      accBtn.className = "btn-accept" + (curStatus === "accepted" ? " active" : "");
-      accBtn.textContent = curStatus === "accepted" ? "✅ 已通过" : "✅ 通过";
-      accBtn.onclick = (e) => {
-        e.stopPropagation();
-        markRound(a, "accepted", "");
-        openRejectEditors.delete(a.id);
-        persist();
-        render();
-      };
-
-      const rejBtn = document.createElement("button");
-      rejBtn.className = "btn-reject" + (curStatus === "rejected" ? " active" : "");
-      rejBtn.textContent = curStatus === "rejected" ? "↩️ 已驳回" : "↩️ 驳回";
-      rejBtn.onclick = (e) => {
-        e.stopPropagation();
-        openRejectEditors.add(a.id);
-        if (curStatus !== "rejected") {
-          markRound(a, "rejected");
-          persist();
-        }
-        render();
-        setTimeout(() => {
-          const el = document.getElementById("rej-txt-" + a.id);
-          if (el) { autoSizeTextarea(el); el.focus(); }
-        }, 30);
-      };
-
-      rbar.appendChild(accBtn);
-      rbar.appendChild(rejBtn);
-      card.appendChild(rbar);
     }
 
     if (curStatus === "rejected" || openRejectEditors.has(a.id)) {
@@ -2201,12 +2241,12 @@ function renderCards() {
       const isEditingRej = openRejectEditors.has(a.id) || !(curReason || "").trim();
       const rhead = document.createElement("div");
       rhead.className = "reject-box-title";
-      rhead.innerHTML = `<span>↩️ 驳回原因${isEditingRej ? "（输入中）" : ""}</span>`;
+      rhead.innerHTML = `<span>驳回原因${isEditingRej ? "（输入中）" : ""}</span>`;
       if (!isEditingRej) {
         const eb = document.createElement("button");
         eb.className = "mini-link";
         eb.style.color = "#fca5a5";
-        eb.textContent = "✏️ 修改";
+        eb.textContent = "修改";
         eb.onclick = () => { openRejectEditors.add(a.id); renderCards(); };
         rhead.appendChild(eb);
       }
@@ -2247,64 +2287,67 @@ function renderCards() {
     if (a.author === "ai" && a.reply) {
       const urep = document.createElement("div");
       urep.className = "note-display";
-      urep.innerHTML = `<div class="note-display-head"><span>💬 你的补充意见</span></div>`;
+      urep.innerHTML = `<div class="note-display-head"><span>你的补充意见</span></div>`;
       const ub = document.createElement("div");
       ub.textContent = a.reply;
       urep.appendChild(ub);
       card.appendChild(urep);
     }
 
-    const row = document.createElement("div");
-    row.className = "status-row";
-    const statuses = [
-      ["approved", "同意修"],
-      ["fixed", "待验收"],
-      ["accepted", "已通过"],
-      ["rejected", "已驳回"],
-      ["discussed", "待探讨"],
-      ["ignored", "忽略"]
-    ];
-    for (const [st, label] of statuses) {
-      const b = document.createElement("button");
-      b.textContent = label;
-      if (curStatus === st) b.className = "on-" + st;
-      b.onclick = (e) => { e.stopPropagation(); markRound(a, st); persist(); render(); };
-      row.appendChild(b);
-    }
-    const del = document.createElement("button");
-    del.className = "del";
-    del.textContent = "删除";
-    del.onclick = (e) => {
-      e.stopPropagation();
-      state.annotations = state.annotations.filter(x => x.id !== a.id);
-      if (selectedId === a.id) selectedId = null;
-      persist();
-      render();
-    };
-    const job = activeJobForAnn(a.id);
+    // 底部操作区：严格按当前状态只显示用户此刻真正需要点的 1～2 个按钮
+    const actions = document.createElement("div");
+    actions.className = "card-actions";
     if (job) {
       const pill = document.createElement("button");
       pill.className = "job-pill " + job.status;
-      pill.textContent = job.status === "queued" ? `⏳ ${job.agentLabel} 排队中` : `⚡ ${job.agentLabel} 执行中`;
+      pill.textContent = job.status === "queued" ? `⏳ ${job.agentLabel} 排队中` : `⚡ ${job.agentLabel} 执行中…`;
       pill.onclick = (e) => { e.stopPropagation(); openJobLog(job.id); };
-      row.appendChild(pill);
+      actions.appendChild(pill);
       const stopBtn = document.createElement("button");
-      stopBtn.style.cssText = "color:#fca5a5;border-color:rgba(239,68,68,.35);";
+      stopBtn.className = "btn-stop";
       stopBtn.textContent = "停止";
       stopBtn.onclick = (e) => { e.stopPropagation(); cancelJob(job.id); };
-      row.appendChild(stopBtn);
-    } else {
+      actions.appendChild(stopBtn);
+    } else if (curStatus === "fixed") {
+      const accBtn = document.createElement("button");
+      accBtn.className = "btn-accept";
+      accBtn.textContent = "✓ 通过";
+      accBtn.onclick = (e) => {
+        e.stopPropagation();
+        markRound(a, "accepted", "");
+        openRejectEditors.delete(a.id);
+        persist();
+        render();
+      };
+      const rejBtn = document.createElement("button");
+      rejBtn.className = "btn-reject";
+      rejBtn.textContent = "↩ 驳回";
+      rejBtn.onclick = (e) => {
+        e.stopPropagation();
+        openRejectEditors.add(a.id);
+        markRound(a, "rejected");
+        persist();
+        render();
+        setTimeout(() => {
+          const el = document.getElementById("rej-txt-" + a.id);
+          if (el) { autoSizeTextarea(el); el.focus(); }
+        }, 30);
+      };
+      actions.appendChild(accBtn);
+      actions.appendChild(rejBtn);
+    } else if (curStatus === "open" || curStatus === "approved" || curStatus === "rejected") {
       const ag = selectedAgentObj();
       if (ag && ag.available) {
         const runBtn = document.createElement("button");
         runBtn.className = "btn-dispatch";
-        runBtn.textContent = `🚀 派给 ${ag.label}`;
+        runBtn.textContent = curStatus === "rejected" ? `🚀 派给 ${ag.label} 重修` : `🚀 派给 ${ag.label}`;
         runBtn.onclick = (e) => { e.stopPropagation(); dispatchAnnotations([a.id]); };
-        row.appendChild(runBtn);
+        actions.appendChild(runBtn);
       }
     }
-    row.appendChild(del);
-    card.appendChild(row);
+    if (actions.childElementCount > 0) {
+      card.appendChild(actions);
+    }
     container.appendChild(card);
   }
 }

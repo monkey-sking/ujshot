@@ -29,6 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from . import dispatcher as _dispatcher
+except ImportError:  # pragma: no cover
+    import dispatcher as _dispatcher  # type: ignore[no-redef]
+
 from . import config
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp"}
@@ -662,7 +667,46 @@ HTML_PAGE = r"""<!DOCTYPE html>
   }
   aside.left { border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 0; }
   #imageList { flex: 1; overflow-y: auto; padding: 10px; }
-  aside.right { border-left: 1px solid var(--border); display: flex; flex-direction: column; gap: 10px; }
+  aside.right { border-left: 1px solid var(--border); display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+  #annList { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+  .dispatch-bar {
+    padding: 8px 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 6px; flex-shrink: 0;
+  }
+  .dispatch-bar select {
+    background: var(--bg); color: var(--text); border: 1px solid var(--border);
+    border-radius: 7px; padding: 4px 6px; font: inherit; font-size: 11.5px;
+    max-width: 118px; cursor: pointer;
+  }
+  .dispatch-bar select:focus { outline: none; border-color: var(--ai); }
+  .btn-dispatch {
+    background: rgba(45,212,191,.14); border-color: rgba(45,212,191,.42); color: var(--ai);
+    padding: 4px 9px; font-size: 11.5px; font-weight: 600; flex-shrink: 0;
+  }
+  .btn-dispatch:hover { background: rgba(45,212,191,.24); border-color: var(--ai); }
+  .btn-dispatch:disabled { opacity: .4; cursor: not-allowed; }
+  .job-pill {
+    display: inline-flex; align-items: center; gap: 5px; font-size: 11px;
+    padding: 2px 8px; border-radius: 999px; font-weight: 600; white-space: nowrap;
+    background: rgba(56,189,248,.14); color: #7dd3fc; border: 1px solid rgba(56,189,248,.35);
+  }
+  .job-pill.queued { background: rgba(251,191,36,.12); color: #fcd34d; border-color: rgba(251,191,36,.35); }
+  .job-pill.failed { background: rgba(239,68,68,.14); color: #fca5a5; border-color: rgba(239,68,68,.35); }
+  .job-pill.done { background: rgba(34,197,94,.14); color: #86efac; border-color: rgba(34,197,94,.35); }
+  .log-drawer {
+    border-bottom: 1px solid var(--border); background: #0b0d12;
+    padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+    max-height: 240px; flex-shrink: 0;
+  }
+  .log-drawer-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 6px;
+    font-size: 11px; color: var(--muted);
+  }
+  .log-drawer pre {
+    margin: 0; overflow: auto; flex: 1; max-height: 185px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 10.5px;
+    line-height: 1.45; color: #cbd5e1; white-space: pre-wrap; word-break: break-all;
+  }
   .thumb-item {
     display: flex; align-items: flex-start; gap: 9px; padding: 8px;
     border-radius: 10px; cursor: pointer; border: 1px solid transparent;
@@ -1026,7 +1070,15 @@ HTML_PAGE = r"""<!DOCTYPE html>
     </div>
     <div class="stage-hint" id="stageHint"></div>
   </section>
-  <aside class="right" id="annList"></aside>
+  <aside class="right">
+    <div class="dispatch-bar" id="dispatchBar">
+      <select id="agentSelect" onchange="onAgentChange(this.value)" title="选择要拉起的本地 Agent"></select>
+      <button class="btn-dispatch" id="batchDispatchBtn" onclick="dispatchScreen()" title="把本屏待处理与已驳回批注打包交给选中的 Agent 一次修改">🚀 打包派发本屏</button>
+      <button class="mini-link" id="logToggleBtn" onclick="toggleLogDrawer()" style="display:none;margin-left:auto;">日志</button>
+    </div>
+    <div class="log-drawer" id="logDrawer" style="display:none;"></div>
+    <div id="annList"></div>
+  </aside>
 </main>
 <div class="popover" id="popover" style="display:none;">
   <div style="font-size:12px;color:var(--muted);margin-bottom:6px;" id="popTitle">新增批注</div>
@@ -1128,7 +1180,210 @@ async function init() {
   if (!darkNames.length && lightNames.length) currentAppearance = "light";
   const initialNames = allImageNames(currentAppearance);
   if (initialNames.length > 0 && !initialNames.includes(currentImage)) currentImage = initialNames[0];
+  await loadAgentsAndJobs();
   render();
+}
+
+// ---- 本地 Agent 派发与实时日志（同仓库串行队列）
+let availableAgents = [];
+let selectedAgentId = localStorage.getItem("ujshot.agent") || "";
+let dispatchJobs = [];
+let openLogJobId = null;
+let activeLogJob = null;
+let dispatchPollTimer = null;
+let lastRunningJobIds = new Set();
+
+function activeJobForAnn(annId) {
+  return dispatchJobs.find(j => (j.status === "running" || j.status === "queued") && (j.annIds || []).includes(annId)) || null;
+}
+
+function selectedAgentObj() {
+  return availableAgents.find(a => a.id === selectedAgentId)
+    || availableAgents.find(a => a.available)
+    || availableAgents[0] || null;
+}
+
+function onAgentChange(val) {
+  selectedAgentId = val;
+  try { localStorage.setItem("ujshot.agent", val); } catch (e) {}
+  renderCards();
+}
+
+async function loadAgentsAndJobs() {
+  try {
+    const res = await fetch(api("/api/agents"));
+    const data = await res.json();
+    availableAgents = data.agents || [];
+    dispatchJobs = data.jobs || [];
+    const curRunning = new Set(dispatchJobs.filter(j => j.status === "running" || j.status === "queued").map(j => j.id));
+    let newlyDone = false;
+    for (const id of lastRunningJobIds) {
+      if (!curRunning.has(id)) {
+        const done = dispatchJobs.find(j => j.id === id);
+        if (done && done.status === "done") newlyDone = true;
+      }
+    }
+    lastRunningJobIds = curRunning;
+    if (!selectedAgentId || !availableAgents.some(a => a.id === selectedAgentId)) {
+      const firstAvail = availableAgents.find(a => a.available);
+      selectedAgentId = firstAvail ? firstAvail.id : (availableAgents[0] ? availableAgents[0].id : "");
+    }
+    if (openLogJobId) {
+      try {
+        const lr = await fetch(api(`/api/dispatch/${encodeURIComponent(openLogJobId)}`));
+        if (lr.ok) activeLogJob = await lr.json();
+      } catch (e) {}
+    }
+    if (newlyDone) {
+      const stRes = await fetch(api("/api/state"));
+      state = await stRes.json();
+      showToast("Agent 修改完成，已自动刷新截图与状态");
+      render();
+    } else {
+      renderDispatchBar();
+      renderLogDrawer();
+    }
+    scheduleDispatchPoll(curRunning.size > 0);
+  } catch (e) {
+    renderDispatchBar();
+  }
+}
+
+function scheduleDispatchPoll(hasActive) {
+  if (dispatchPollTimer) { clearTimeout(dispatchPollTimer); dispatchPollTimer = null; }
+  if (hasActive) {
+    dispatchPollTimer = setTimeout(() => { loadAgentsAndJobs().then(() => renderCards()); }, 1500);
+  }
+}
+
+function screenDispatchableAnns() {
+  if (!currentImage) return [];
+  return state.annotations.filter(a =>
+    a.image === currentImage
+    && appearanceOf(a) === currentAppearance
+    && (a.status === "open" || a.status === "approved" || a.status === "rejected")
+  );
+}
+
+function renderDispatchBar() {
+  const sel = document.getElementById("agentSelect");
+  const btn = document.getElementById("batchDispatchBtn");
+  const logBtn = document.getElementById("logToggleBtn");
+  if (!sel || !btn) return;
+  sel.innerHTML = "";
+  const usable = availableAgents.filter(a => a.available);
+  if (availableAgents.length === 0) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "未检测到 Agent";
+    sel.appendChild(opt);
+  } else {
+    for (const a of availableAgents) {
+      const opt = document.createElement("option");
+      opt.value = a.id;
+      opt.textContent = a.available ? a.label : `${a.label} (未安装)`;
+      opt.disabled = !a.available;
+      if (a.id === selectedAgentId) opt.selected = true;
+      sel.appendChild(opt);
+    }
+  }
+  const todo = screenDispatchableAnns();
+  btn.textContent = todo.length ? `🚀 打包派发本屏 (${todo.length})` : "🚀 打包派发本屏";
+  btn.disabled = usable.length === 0 || todo.length === 0;
+  if (logBtn) {
+    const activeCnt = dispatchJobs.filter(j => j.status === "running" || j.status === "queued").length;
+    logBtn.style.display = dispatchJobs.length > 0 ? "inline-block" : "none";
+    logBtn.textContent = activeCnt ? `⚡ 执行中 (${activeCnt})` : `日志 (${dispatchJobs.length})`;
+  }
+}
+
+function toggleLogDrawer() {
+  if (openLogJobId) {
+    openLogJobId = null;
+    activeLogJob = null;
+    renderLogDrawer();
+    return;
+  }
+  const latest = dispatchJobs[0];
+  if (latest) openJobLog(latest.id);
+}
+
+async function openJobLog(jobId) {
+  openLogJobId = jobId;
+  try {
+    const res = await fetch(api(`/api/dispatch/${encodeURIComponent(jobId)}`));
+    if (res.ok) activeLogJob = await res.json();
+  } catch (e) {}
+  renderLogDrawer();
+}
+
+function renderLogDrawer() {
+  const el = document.getElementById("logDrawer");
+  if (!el) return;
+  if (!openLogJobId || !activeLogJob) {
+    el.style.display = "none";
+    el.innerHTML = "";
+    return;
+  }
+  const j = activeLogJob;
+  const stMap = { queued: "排队中", running: "执行中", done: "已完成", failed: "失败", cancelled: "已取消" };
+  const canStop = j.status === "queued" || j.status === "running";
+  el.style.display = "flex";
+  el.innerHTML = `
+    <div class="log-drawer-head">
+      <span class="job-pill ${j.status}">${j.agentLabel} · ${stMap[j.status] || j.status} · ${(j.annIds || []).join(",")}</span>
+      <div style="display:flex;gap:4px;">
+        ${canStop ? `<button class="mini-link" style="color:#fca5a5" onclick="cancelJob('${j.id}')">停止</button>` : ""}
+        <button class="mini-link" onclick="toggleLogDrawer()">收起</button>
+      </div>
+    </div>
+    <pre id="logDrawerPre"></pre>`;
+  const pre = document.getElementById("logDrawerPre");
+  if (pre) {
+    pre.textContent = (j.logLines || []).join("\n") || "等待输出…";
+    pre.scrollTop = pre.scrollHeight;
+  }
+}
+
+async function dispatchAnnotations(annIds) {
+  const ag = selectedAgentObj();
+  if (!ag || !ag.available) { showToast("本机未检测到可用 Agent CLI"); return; }
+  if (!annIds || !annIds.length) { showToast("没有可派发的批注"); return; }
+  try {
+    const res = await fetch(api("/api/dispatch"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent: ag.id,
+        annIds,
+        image: currentImage || "",
+        appearance: currentAppearance
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      showToast("派发失败：" + (data.error || res.status));
+      return;
+    }
+    showToast(`已派发给 ${ag.label}（${annIds.join(", ")}）`);
+    openLogJobId = data.job.id;
+    await loadAgentsAndJobs();
+    renderCards();
+  } catch (e) {
+    showToast("派发请求异常：" + e);
+  }
+}
+
+function dispatchScreen() {
+  const ids = screenDispatchableAnns().map(a => a.id);
+  dispatchAnnotations(ids);
+}
+
+async function cancelJob(jobId) {
+  await fetch(api(`/api/dispatch/${encodeURIComponent(jobId)}/cancel`), { method: "POST" });
+  showToast("已请求停止任务");
+  await loadAgentsAndJobs();
+  renderCards();
 }
 
 // ---- 板子切换菜单：服务端登记了哪些板，这里就列哪些
@@ -1710,6 +1965,8 @@ function render() {
   document.getElementById("canvasWrap").style.pointerEvents = showBeforeCol ? "auto" : "none";
 
   renderOverlay();
+  renderDispatchBar();
+  renderLogDrawer();
   renderCards();
 }
 
@@ -2024,6 +2281,28 @@ function renderCards() {
       persist();
       render();
     };
+    const job = activeJobForAnn(a.id);
+    if (job) {
+      const pill = document.createElement("button");
+      pill.className = "job-pill " + job.status;
+      pill.textContent = job.status === "queued" ? `⏳ ${job.agentLabel} 排队中` : `⚡ ${job.agentLabel} 执行中`;
+      pill.onclick = (e) => { e.stopPropagation(); openJobLog(job.id); };
+      row.appendChild(pill);
+      const stopBtn = document.createElement("button");
+      stopBtn.style.cssText = "color:#fca5a5;border-color:rgba(239,68,68,.35);";
+      stopBtn.textContent = "停止";
+      stopBtn.onclick = (e) => { e.stopPropagation(); cancelJob(job.id); };
+      row.appendChild(stopBtn);
+    } else {
+      const ag = selectedAgentObj();
+      if (ag && ag.available) {
+        const runBtn = document.createElement("button");
+        runBtn.className = "btn-dispatch";
+        runBtn.textContent = `🚀 派给 ${ag.label}`;
+        runBtn.onclick = (e) => { e.stopPropagation(); dispatchAnnotations([a.id]); };
+        row.appendChild(runBtn);
+      }
+    }
     row.appendChild(del);
     card.appendChild(row);
     container.appendChild(card);
@@ -2382,7 +2661,10 @@ NO_BOARDS_PAGE = """<!DOCTYPE html>
 """
 
 
-def make_handler(registry: "BoardRegistry", sim: SimulatorController):
+def make_handler(registry: "BoardRegistry", sim: SimulatorController,
+                 dispatch_mgr: Optional[Any] = None):
+    mgr = dispatch_mgr or _dispatcher.DispatchManager()
+
     class ReviewBoardHandler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
             pass
@@ -2471,6 +2753,25 @@ def make_handler(registry: "BoardRegistry", sim: SimulatorController):
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(raw)
+                return
+
+            if path == "/api/agents":
+                proj = project_root(directory) or directory
+                specs = _dispatcher.discover_agents(proj)
+                self._send_json({
+                    "project": str(proj),
+                    "agents": [s.to_dict() for s in specs],
+                    "jobs": mgr.list_jobs(directory),
+                })
+                return
+
+            if path.startswith("/api/dispatch/"):
+                job_id = urllib.parse.unquote(path[len("/api/dispatch/"):]).strip("/")
+                job = mgr.get_job(job_id, include_logs=True)
+                if job is None:
+                    self.send_error(HTTPStatus.NOT_FOUND)
+                    return
+                self._send_json(job)
                 return
 
             if path == "/api/state":
@@ -2579,6 +2880,34 @@ def make_handler(registry: "BoardRegistry", sim: SimulatorController):
 
             if path in ("/__no_boards__", "/__missing_board__"):
                 self.send_error(HTTPStatus.NOT_FOUND)
+                return
+
+            if path == "/api/dispatch":
+                proj = project_root(directory) or directory
+                agent_id = str(body.get("agent") or "").strip()
+                ann_ids = body.get("annIds") or []
+                appearance = "light" if body.get("appearance") == "light" else "dark"
+                image = str(body.get("image") or "")
+                specs = {s.id: s for s in _dispatcher.discover_agents(proj)}
+                spec = specs.get(agent_id)
+                if spec is None:
+                    self._send_json({"ok": False, "error": f"未知 Agent：{agent_id}"}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                data = load_annotations(directory)
+                id_set = {str(x) for x in ann_ids}
+                chosen = [a for a in data.get("annotations", []) if str(a.get("id") or "") in id_set]
+                try:
+                    job = mgr.enqueue(directory, proj, spec, chosen, appearance=appearance, image=image)
+                except ValueError as exc:
+                    self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                self._send_json({"ok": True, "job": job.to_dict(include_logs=True)})
+                return
+
+            if path.startswith("/api/dispatch/") and path.endswith("/cancel"):
+                job_id = urllib.parse.unquote(path[len("/api/dispatch/"):-len("/cancel")]).strip("/")
+                ok = mgr.cancel(job_id)
+                self._send_json({"ok": ok, "job": mgr.get_job(job_id, include_logs=True)})
                 return
 
             if path == "/api/annotations":

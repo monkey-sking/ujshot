@@ -109,3 +109,49 @@ def test_stream_json_lines_formatted_into_readable_progress():
     ]
     assert mgr._format_display_lines('{"type":"user","message":{}}') == []
     assert mgr._format_display_lines("plain stdout line") == ["plain stdout line"]
+
+
+def test_session_id_persisted_and_resumed_across_restart(tmp_path):
+    bdir = tmp_path / "board"
+    bdir.mkdir()
+    py_script = (
+        "import sys; "
+        "args = sys.argv[1:]; "
+        "_ = sys.stdin.read(); "
+        "print('{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"test\",\"session_id\":\"sess-12345678\"}', flush=True); "
+        "print('args=' + '|'.join(args), flush=True)"
+    )
+    spec = dispatcher.AgentSpec(
+        id="fake",
+        label="Fake",
+        cmd=[sys.executable, "-c", py_script, "fresh"],
+        resume_cmd=[sys.executable, "-c", py_script, "resume", "{session_id}"],
+        stdin=True,
+        available=True,
+    )
+    mgr1 = dispatcher.DispatchManager()
+    j1 = mgr1.enqueue(bdir, tmp_path, spec, [{"id": "U34", "image": "a.png", "text": "fix"}])
+    deadline = time.time() + 5
+    while time.time() < deadline and mgr1.get_job(j1.id)["status"] not in ("done", "failed"):
+        time.sleep(0.05)
+    assert mgr1.get_job(j1.id)["sessionId"] == "sess-12345678"
+    assert (bdir / ".dispatch-logs" / "jobs.json").is_file()
+
+    # Simulate a brand-new DispatchManager after service restart
+    mgr2 = dispatcher.DispatchManager()
+    loaded = mgr2.list_jobs(bdir)
+    assert len(loaded) == 1
+    assert loaded[0]["sessionId"] == "sess-12345678"
+
+    j2 = mgr2.enqueue(
+        bdir, tmp_path, spec,
+        [{"id": "U34", "image": "a.png", "text": "fix"}],
+        resume_session_id=loaded[0]["sessionId"],
+    )
+    deadline = time.time() + 5
+    while time.time() < deadline and mgr2.get_job(j2.id)["status"] not in ("done", "failed"):
+        time.sleep(0.05)
+    d2 = mgr2.get_job(j2.id, include_logs=True)
+    assert d2["status"] == "done"
+    assert d2["resumedFrom"] == "sess-12345678"
+    assert any("args=resume|sess-12345678" in line for line in d2["logLines"])

@@ -87,3 +87,25 @@ def test_serial_queue_runs_jobs_sequentially_and_streams_logs(tmp_path):
     assert marker.read_text(encoding="utf-8").splitlines() == [
         "J1:start", "J1:end", "J2:start", "J2:end"
     ]
+
+
+def test_stream_json_lines_formatted_into_readable_progress():
+    mgr = dispatcher.DispatchManager()
+    assert mgr._format_display_lines('{"type":"system","subtype":"init","model":"claude-sonnet","session_id":"abcdef123456"}') == [
+        "[会话] 已连接 model=claude-sonnet id=abcdef12"
+    ]
+    tool_evt = (
+        '{"type":"assistant","message":{"content":['
+        '{"type":"tool_use","name":"Read","input":{"file_path":"App/Sources/Foo.swift"}},'
+        '{"type":"text","text":"准备修改对齐间距"}'
+        ']}}'
+    )
+    assert mgr._format_display_lines(tool_evt) == [
+        "[工具] Read · App/Sources/Foo.swift",
+        "[回复] 准备修改对齐间距",
+    ]
+    assert mgr._format_display_lines('{"type":"result","result":"已完成修改","num_turns":4}') == [
+        "[结果] 已完成修改（4 轮）"
+    ]
+    assert mgr._format_display_lines('{"type":"user","message":{}}') == []
+    assert mgr._format_display_lines("plain stdout line") == ["plain stdout line"]

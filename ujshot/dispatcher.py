@@ -59,13 +59,23 @@ BUILTIN_AGENTS: List[AgentSpec] = [
     AgentSpec(
         id="claude",
         label="Claude Code",
-        cmd=["claude", "-p", "--permission-mode", "acceptEdits"],
+        cmd=[
+            "claude", "-p",
+            "--verbose",
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+        ],
         stdin=True,
     ),
     AgentSpec(
         id="agy",
         label="Antigravity",
-        cmd=["agy", "-p", "--mode", "accept-edits", "{prompt}"],
+        cmd=[
+            "agy", "-p",
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+            "{prompt}",
+        ],
         stdin=False,
     ),
     AgentSpec(
@@ -361,6 +371,61 @@ class DispatchManager:
                     pass
         return True
 
+    def _format_display_lines(self, raw: str) -> List[str]:
+        """Turn NDJSON ``stream-json`` events into readable live progress lines."""
+        s = raw.strip()
+        if not s:
+            return []
+        if not s.startswith("{"):
+            return [s]
+        try:
+            obj = json.loads(s)
+        except Exception:
+            return [s]
+        if not isinstance(obj, dict):
+            return [s]
+        kind = obj.get("type")
+        if kind == "system" and obj.get("subtype") == "init":
+            model = obj.get("model") or ""
+            sid = str(obj.get("session_id") or "")[:8]
+            return [f"[会话] 已连接 model={model} id={sid}"]
+        if kind == "assistant":
+            msg = obj.get("message") or {}
+            blocks = msg.get("content") if isinstance(msg, dict) else None
+            out: List[str] = []
+            if isinstance(blocks, list):
+                for b in blocks:
+                    if not isinstance(b, dict):
+                        continue
+                    bt = b.get("type")
+                    if bt == "tool_use":
+                        name = b.get("name") or "tool"
+                        inp = b.get("input") or {}
+                        arg = ""
+                        if isinstance(inp, dict):
+                            for k in ("file_path", "path", "command", "pattern", "query", "description"):
+                                if inp.get(k):
+                                    arg = str(inp[k]).replace("\n", " ")[:120]
+                                    break
+                        out.append(f"[工具] {name}" + (f" · {arg}" if arg else ""))
+                    elif bt == "text":
+                        txt = str(b.get("text") or "").strip()
+                        if txt:
+                            first = txt.splitlines()[0][:200]
+                            out.append(f"[回复] {first}")
+            return out
+        if kind == "result":
+            res = str(obj.get("result") or "").strip()
+            is_err = bool(obj.get("is_error"))
+            turns = obj.get("num_turns")
+            prefix = "[错误]" if is_err else "[结果]"
+            summary = res.splitlines()[0][:200] if res else ("执行失败" if is_err else "已完成")
+            extra = f"（{turns} 轮）" if turns else ""
+            return [f"{prefix} {summary}{extra}"]
+        if kind in ("user", "rate_limit_event", "stream_event"):
+            return []
+        return []
+
     def _append_log(self, job: DispatchJob, line: str, log_fp: Any) -> None:
         text = line.rstrip("\r\n")
         try:
@@ -368,8 +433,11 @@ class DispatchManager:
             log_fp.flush()
         except OSError:
             pass
+        display_lines = self._format_display_lines(text)
+        if not display_lines:
+            return
         with self._lock:
-            job.log_lines.append(text)
+            job.log_lines.extend(display_lines)
             if len(job.log_lines) > MAX_LOG_LINES:
                 del job.log_lines[: len(job.log_lines) - MAX_LOG_LINES]
 

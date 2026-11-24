@@ -48,6 +48,7 @@ class Config:
     flow_dir: str = "flows"
     board_script: str = ""
     board_port: int = 8766
+    shot_id_style: str = ""           # "", "zh" (编号-页面-状态), or "en" (NN-page-state)
     danger_words: list = field(default_factory=list)   # 覆盖默认的"会改数据"文案
     raw: Dict[str, str] = field(default_factory=dict)
     source: Optional[str] = None      # which ujshot.toml we loaded
@@ -137,6 +138,8 @@ def load(start: str = ".") -> Config:
                 cfg.board_port = int(flat["board.port"])
             except ValueError:
                 pass
+        if flat.get("board.shot_id_style"):
+            cfg.shot_id_style = flat["board.shot_id_style"].strip().lower()
         if flat.get("safety.danger_words"):
             # 逗号分隔即可，避免为列表写完整 TOML 解析
             cfg.danger_words = [w.strip() for w in flat["safety.danger_words"].split(",") if w.strip()]

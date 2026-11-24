@@ -14,6 +14,8 @@ import shutil
 import subprocess
 import sys
 import time
+from pathlib import Path
+from typing import Optional
 
 from .types import Device
 
@@ -31,13 +33,55 @@ def run(args, timeout=240):
         raise ToolError(f"找不到命令：{args[0]}（{exc}）") from exc
 
 
-def which_axe() -> str:
+def _executable_path(candidate: str) -> Optional[str]:
+    if not candidate:
+        return None
+    expanded = os.path.expanduser(candidate)
+    if os.path.isfile(expanded) and os.access(expanded, os.X_OK):
+        return expanded
+    return shutil.which(candidate)
+
+
+def find_axe() -> Optional[str]:
+    """Locate the AXe binary cleanly without raising when absent."""
+    for env_key in ("UJSHOT_AXE", "FIXKIT_AXE"):
+        env_val = os.environ.get(env_key, "").strip()
+        hit = _executable_path(env_val)
+        if hit:
+            return hit
+
     found = shutil.which("axe")
     if found:
         return found
+
     for guess in ("/opt/homebrew/bin/axe", "/usr/local/bin/axe"):
-        if os.path.exists(guess):
+        if os.path.isfile(guess) and os.access(guess, os.X_OK):
             return guess
+
+    npx_cache = Path.home() / ".npm" / "_npx"
+    if npx_cache.is_dir():
+        candidates = []
+        try:
+            for folder in npx_cache.iterdir():
+                bundled = folder / "node_modules" / "xcodebuildmcp" / "bundled" / "axe"
+                if bundled.is_file() and os.access(bundled, os.X_OK):
+                    try:
+                        candidates.append((bundled.stat().st_mtime, str(bundled)))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+        if candidates:
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            return candidates[0][1]
+
+    return None
+
+
+def which_axe() -> str:
+    found = find_axe()
+    if found:
+        return found
     raise ToolError(
         "找不到 axe。装法：brew install cameroncooke/axe/axe\n"
         "  或者 `axe init` 后按提示安装。没有 axe 就无法读取 AX 树，只剩坐标点击。"
@@ -105,6 +149,17 @@ def ensure_booted(udid: str) -> bool:
 
 
 def display_size(axe: str, udid: str, default=(440, 956)):
+    r_json = run([axe, "--output", "json", "displays", "--udid", udid], timeout=120)
+    if r_json.returncode == 0 and (r_json.stdout or "").strip():
+        try:
+            data = json.loads(r_json.stdout)
+            screen = data.get("data", {}).get("result", {}).get("activeScreen", {})
+            w = int(screen.get("width") or 0)
+            h = int(screen.get("height") or 0)
+            if w > 0 and h > 0:
+                return (w, h)
+        except Exception:
+            pass
     r = run([axe, "displays", "--udid", udid], timeout=120)
     m = re.search(r"(\d+)×(\d+) pt", r.stdout or "")
     return (int(m.group(1)), int(m.group(2))) if m else default
@@ -252,7 +307,7 @@ def flatten(node, acc=None) -> list:
     return acc
 
 
-def ax_tree(axe: str, udid: str, retries: int = 3):
+def ax_tree(axe: str, udid: str, retries: int = 3, timeout: int = 240):
     """Return (raw, nodes). axe sometimes returns only the app root — retry.
 
     Callers must treat an empty/short tree as "unknown", not "nothing on screen":
@@ -260,27 +315,46 @@ def ax_tree(axe: str, udid: str, retries: int = 3):
     """
     best = []
     best_raw = None
-    for _ in range(max(1, retries)):
-        r = run([axe, "describe-ui", "--udid", udid], timeout=240)
+    attempts = max(1, retries)
+    for attempt in range(attempts):
+        r = run([axe, "describe-ui", "--udid", udid], timeout=timeout)
         if r.returncode != 0 or not r.stdout.strip():
-            time.sleep(0.6)
+            if attempt + 1 < attempts:
+                time.sleep(0.6)
             continue
         try:
             data = json.loads(r.stdout)
         except Exception:
-            time.sleep(0.6)
+            if attempt + 1 < attempts:
+                time.sleep(0.6)
             continue
         nodes = flatten(data)
         if len(nodes) > len(best):
             best, best_raw = nodes, data
         if len(nodes) > 3:
             return data, nodes
-        time.sleep(0.6)
+        if attempt + 1 < attempts:
+            time.sleep(0.6)
     return best_raw, best
 
 
 def frame_of(node):
-    raw = (node or {}).get("AXFrame") or ""
+    if not isinstance(node, dict):
+        return None
+    fr = node.get("frame")
+    if isinstance(fr, dict):
+        x = fr.get("x")
+        y = fr.get("y")
+        w = fr.get("width", fr.get("w"))
+        h = fr.get("height", fr.get("h"))
+        if x is not None and y is not None and w is not None and h is not None:
+            try:
+                return (float(x), float(y), float(w), float(h))
+            except (TypeError, ValueError):
+                pass
+    raw = node.get("AXFrame") or ""
+    if not isinstance(raw, str):
+        return None
     nums = re.findall(r"-?\d+\.?\d*", raw)
     if len(nums) != 4:
         return None

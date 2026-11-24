@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
+from typing import List, Optional, Tuple
 
 from . import device as dev
 from . import ocr
@@ -74,6 +76,38 @@ def is_blank(png: str, max_colors: int = 40) -> bool:
     if colors is None:          # more colours than the cap → definitely not blank
         return False
     return len(colors) < max_colors
+
+
+def match_text_rule(rule: str, text: str) -> bool:
+    """Match plain substring or `re:<pattern>` regex against screen text."""
+    if rule.startswith("re:"):
+        return bool(re.search(rule[3:], text))
+    return rule in text
+
+
+def evaluate_verdict(
+    text: str,
+    expect=(),
+    expect_absent=(),
+    diff_pct: Optional[float] = None,
+    ocr_available: bool = True,
+    blank: bool = False,
+) -> Tuple[str, List[str], List[str]]:
+    """Evaluate a screen capture verdict (`ok` or failure reason, missing, leaked)."""
+    if not text.strip() and blank:
+        return "blank-or-not-app", [], []
+    if expect or expect_absent:
+        if not ocr_available:
+            return "ocr-unavailable", [], []
+        missing = [e for e in expect if not match_text_rule(e, text)]
+        leaked = [e for e in expect_absent if match_text_rule(e, text)]
+        if missing:
+            return "expect-missing", missing, leaked
+        if leaked:
+            return "unexpected-text", missing, leaked
+    if diff_pct is not None and diff_pct < 0.5:
+        return "no-visible-change", [], []
+    return "ok", [], []
 
 
 class Runner:
@@ -144,8 +178,13 @@ class Runner:
         ident, label = spec.get("id"), spec.get("label")
         if ident:
             nodes = self.nodes()
+            if not dev.find(nodes, ident=ident) and not dev.find(nodes, prefix=ident):
+                self.wait(1.0)
+                nodes = self.nodes()
             if dev.find(nodes, ident=ident):
-                return dev.tap_id(self.axe, self.udid, ident), f"id:{ident}"
+                ok = dev.tap_id(self.axe, self.udid, ident)
+                self.wait(wait)
+                return ok, f"id:{ident}"
             if dev.find(nodes, prefix=ident):
                 hit = dev.find(nodes, prefix=ident)
                 key = hit.get("AXUniqueId")
@@ -193,7 +232,7 @@ class Runner:
         for _ in range(20):
             self.wait(1.2)
             text = self.screen_text()
-            if text:
+            if text and len(self.nodes()) > 5:
                 return True
             # 首次启动可能弹系统授权，点掉
             self.tap_ocr("使用App时允许", 1.2) or self.tap_ocr("允许", 1.2)
@@ -233,25 +272,14 @@ class Runner:
         text = ocr.text_of(info)
         step.text = text[:400]
 
-        verdict = "ok"
-        if not text.strip() and is_blank(png):
-            # 认不出字 + 近纯色：多半不是 App 界面（桌面/黑屏/白屏/启动闪屏）。
-            # 这种"证据"比没有更糟，必须判失败而不是 ok。
-            verdict = "blank-or-not-app"
-        elif step.expect or step.expect_absent:
-            if not info:
-                # 不能把「OCR 没跑起来」当成通过，也不能当成缺文案
-                verdict = "ocr-unavailable"
-            else:
-                missing = [e for e in step.expect if e not in text]
-                leaked = [e for e in step.expect_absent if e in text]
-                if missing:
-                    verdict = "expect-missing"
-                elif leaked:
-                    verdict = "unexpected-text"
-
-        if verdict == "ok" and step.diff_pct is not None and step.diff_pct < 0.5:
-            verdict = "no-visible-change"
+        verdict, _, _ = evaluate_verdict(
+            text=text,
+            expect=step.expect,
+            expect_absent=step.expect_absent,
+            diff_pct=step.diff_pct,
+            ocr_available=bool(info),
+            blank=is_blank(png),
+        )
 
         step.verdict = verdict
         step.ok = verdict == "ok"
@@ -331,7 +359,7 @@ class Runner:
 
     def _op_expect(self, spec, label):
         text = self.screen_text()
-        hit = all(k in text for k in spec["text"])
+        hit = all(match_text_rule(k, text) for k in spec["text"])
         self.result.steps.append(Step(id=label, title=f"期望 {spec['text']}", ok=hit))
         log(f"  ? 期望 {spec['text']} → {'在' if hit else '不在'}")
         if not hit:
@@ -339,7 +367,11 @@ class Runner:
 
     def _op_launch(self, spec, label):
         if spec.get("args") is not None:
-            self.flow.launch_args = list(spec["args"])
+            merged = list(spec["args"])
+            for a in getattr(self.flow, "extra_launch_args", []) or []:
+                if a not in merged:
+                    merged.append(a)
+            self.flow.launch_args = merged
         self.restart()
         self.result.steps.append(Step(id=label, title="重启 App"))
 
@@ -360,7 +392,8 @@ class Runner:
         ok = False
         rounds = int(spec.get("retries", 3))
         for _ in range(rounds):
-            if all(k in self.screen_text() for k in want):
+            screen_txt = self.screen_text()
+            if all(match_text_rule(k, screen_txt) for k in want):
                 ok = True
                 break
             if not recovery:

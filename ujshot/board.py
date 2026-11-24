@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -32,9 +33,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 
+from . import inspect as _inspect
+
 MARK = "ujshot"          # our annotations carry source=<MARK> so re-runs can replace them
-RELEVANT = ("open", "rejected", "fixed")
+RELEVANT = ("open", "proposed", "approved", "rejected", "fixed")
 VERSIONS_NAME = "versions.json"
+UNCHANGED_DIFF_THRESHOLD = 0.25   # 忽略顶部状态栏后像素差 < 0.25% 视为画面未发生变化
 
 
 def _log(msg: str) -> None:
@@ -46,23 +50,118 @@ def prepare(board_dir: str) -> str:
     return board_dir
 
 
+def _round_sort_key(name: str):
+    return (0, int(name), "") if re.fullmatch(r"\d+", name) else (1, 0, name)
+
+
+def _latest_existing_shot(board_dir: str, image_name: str, appearance: str = "dark",
+                          exclude_round: str = ""):
+    """Find the most recent existing screenshot on the board for pixel comparison.
+
+    Returns ``(path, build_label)`` or ``(None, "")``.
+    """
+    is_light = appearance == "light"
+    after_base = os.path.join(board_dir, "after", "light") if is_light else os.path.join(board_dir, "after")
+    if os.path.isdir(after_base):
+        subdirs = [
+            d for d in os.listdir(after_base)
+            if os.path.isdir(os.path.join(after_base, d))
+            and not d.startswith(".")
+            and (is_light or d not in ("light", "dark"))
+            and str(d) != str(exclude_round)
+        ]
+        for sub in reversed(sorted(subdirs, key=_round_sort_key)):
+            cand = os.path.join(after_base, sub, image_name)
+            if os.path.isfile(cand):
+                return cand, sub
+        if exclude_round != "":
+            flat = os.path.join(after_base, image_name)
+            if os.path.isfile(flat):
+                return flat, ""
+    before_base = os.path.join(board_dir, "light") if is_light else board_dir
+    cand_before = os.path.join(before_base, image_name)
+    if os.path.isfile(cand_before):
+        return cand_before, ""
+    return None, ""
+
+
+def _screen_pixel_diff(path_a: str, path_b: str, crop_status_bar: bool = True):
+    """Compare two screenshots, masking out the top 5.5% iOS status bar (clock/battery)."""
+    try:
+        from PIL import Image, ImageChops
+    except ImportError:
+        return None
+    try:
+        ia, ib = Image.open(path_a).convert("RGB"), Image.open(path_b).convert("RGB")
+    except Exception:
+        return None
+    if ia.size != ib.size:
+        return 100.0
+    w, h = ia.size
+    top = int(h * 0.055) if (crop_status_bar and h > 100) else 0
+    ca, cb = ia.crop((0, top, w, h)), ib.crop((0, top, w, h))
+    denom = ca.size[0] * ca.size[1]
+    if denom <= 0:
+        return 0.0
+    hist = ImageChops.difference(ca, cb).convert("L").histogram()
+    return round(sum(hist[8:]) / denom * 100, 2)
+
+
+def _load_board_json(board_dir: str) -> dict:
+    path = os.path.join(board_dir, "annotations.json")
+    base = {"version": 1, "directory": os.path.basename(board_dir), "annotations": [], "screenChecks": {}}
+    if os.path.exists(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict) and isinstance(data.get("annotations"), list):
+                if not isinstance(data.get("screenChecks"), dict):
+                    data["screenChecks"] = {}
+                base = data
+        except (OSError, json.JSONDecodeError):
+            pass
+    return base
+
+
+def _has_active_human_issue(annotations: list, image_name: str, appearance: str) -> bool:
+    app = "light" if appearance == "light" else "dark"
+    for a in annotations:
+        if a.get("image") != image_name or (a.get("appearance") or "dark") != app:
+            continue
+        if a.get("source") == MARK:
+            continue
+        st = a.get("status") or "open"
+        rounds = a.get("rounds")
+        if isinstance(rounds, list) and rounds:
+            st = rounds[-1].get("status") or st
+        if st in ("open", "proposed", "approved", "rejected", "fixed", "discussed"):
+            return True
+    return False
+
+
 def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
                baseline_dir=None, before_map=None, round_build="",
-               appearance: str = "dark"):
+               appearance: str = "dark", force_all: bool = False):
     """Copy this run's screenshots into the board layout.
 
     Both sides must share file names or the board cannot pair them, so the name
     is always the flow's shot id — never the original file name.
 
-    ``round_build`` puts the after images in their own round directory
-    (``after/234/``): the same issue fixed twice keeps both attempts instead of
-    the second run overwriting the first.
-
-    ``appearance`` separates dark (default root + ``after/<build>/``) from light
-    (``light/`` + ``after/light/<build>/``) so dark and light screenshots never
-    overwrite or mix with each other.
+    When ``as_after=True`` and ``round_build`` is set (multi-round mode) and
+    ``force_all=False``:
+    - If a screen already exists in an earlier round/baseline, has no active
+      human annotation, and its pixel diff (excluding the status bar clock) is
+      below ``UNCHANGED_DIFF_THRESHOLD`` (0.25%), we **skip copying** the
+      redundant identical screenshot so ``after/<build>/`` only stores screens
+      that actually changed or had issues fixed.
+    - If a screen was previously marked ``status="ok"`` (or all its previous
+      human annotations were already ``accepted``) and its pixel diff is
+      ``>= UNCHANGED_DIFF_THRESHOLD``, we copy the new screenshot and transition
+      its ``screenChecks`` entry to ``status="updated"`` ("界面有更新") so the
+      reviewer is alerted to re-check it.
     """
     is_light = appearance == "light"
+    app = "light" if is_light else "dark"
     if as_after:
         dest = os.path.join(board_dir, "after", "light") if is_light else os.path.join(board_dir, "after")
         if round_build:
@@ -70,13 +169,78 @@ def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
     else:
         dest = os.path.join(board_dir, "light") if is_light else board_dir
     os.makedirs(dest, exist_ok=True)
-    placed, seeded = [], []
+
+    board_data = _load_board_json(board_dir)
+    anns = board_data.get("annotations", [])
+    screen_checks = dict(board_data.get("screenChecks") or {})
+    checks_dirty = False
+    meta_dir = _inspect.meta_dir_for(
+        board_dir, appearance=app, as_after=as_after, round_build=round_build
+    )
+
+    placed, seeded, skipped_unchanged, marked_updated = [], [], [], []
     for s in shots:
-        src = os.path.join(outdir, "screens", f"{s.id}.png")
+        img_name = f"{s.id}.png"
+        src = os.path.join(outdir, "screens", img_name)
         if not os.path.exists(src):
             continue
-        shutil.copy(src, os.path.join(dest, f"{s.id}.png"))
-        placed.append(f"{s.id}.png")
+
+        if as_after and round_build and not force_all:
+            prev_path, prev_build = _latest_existing_shot(
+                board_dir, img_name, appearance=app, exclude_round=round_build
+            )
+            if prev_path:
+                diff = _screen_pixel_diff(prev_path, src)
+                has_active = _has_active_human_issue(anns, img_name, app)
+                check_key = f"{app}:{img_name}"
+                cur_check = screen_checks.get(check_key) or {}
+                cur_check_status = cur_check.get("status")
+                human_anns = [
+                    a for a in anns
+                    if a.get("image") == img_name
+                    and (a.get("appearance") or "dark") == app
+                    and a.get("source") != MARK
+                ]
+                was_settled_ok = (cur_check_status == "ok") or (
+                    bool(human_anns) and not has_active
+                )
+
+                if diff is not None and diff < UNCHANGED_DIFF_THRESHOLD and not has_active:
+                    # 画面没动且没有待处理/待验收批注 → 不再重复存新截图
+                    skipped_unchanged.append(img_name)
+                    continue
+
+                if diff is not None and diff >= UNCHANGED_DIFF_THRESHOLD and was_settled_ok and not has_active:
+                    # 之前已经确认「界面没问题」或全部通过，但其他改动连带影响了该界面 → 自动标为「界面有更新」
+                    screen_checks[check_key] = {
+                        "status": "updated",
+                        "build": str(round_build),
+                        "prevBuild": str(cur_check.get("build") or prev_build or ""),
+                        "diffPct": diff,
+                        "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+                    }
+                    checks_dirty = True
+                    marked_updated.append(f"{img_name} ({diff}%)")
+
+        shutil.copy(src, os.path.join(dest, img_name))
+        placed.append(img_name)
+
+        ax_src = os.path.join(outdir, "trees", f"{s.id}.json")
+        ocr_src = os.path.join(outdir, "ocr", f"{s.id}.json")
+        if os.path.isfile(ax_src) or os.path.isfile(ocr_src):
+            meta_dir.mkdir(parents=True, exist_ok=True)
+            if os.path.isfile(ax_src):
+                shutil.copy(ax_src, str(meta_dir / f"{s.id}.ax.json"))
+            if os.path.isfile(ocr_src):
+                shutil.copy(ocr_src, str(meta_dir / f"{s.id}.ocr.json"))
+
+    if checks_dirty:
+        board_data["screenChecks"] = screen_checks
+        board_data["updatedAt"] = datetime.now().astimezone().isoformat(timespec="seconds")
+        ann_path = os.path.join(board_dir, "annotations.json")
+        with open(ann_path, "w", encoding="utf-8") as f:
+            json.dump(board_data, f, ensure_ascii=False, indent=2)
+            f.write("\n")
 
     if baseline_dir and os.path.isdir(baseline_dir):
         mapping = before_map or {}
@@ -89,11 +253,13 @@ def copy_shots(board_dir: str, outdir: str, shots, as_after=False,
             if os.path.exists(src) and not os.path.exists(dst):
                 shutil.copy(src, dst)
                 seeded.append(f"{s.id}.png ← {src_name}")
+    copy_shots.last_skipped = skipped_unchanged  # type: ignore[attr-defined]
+    copy_shots.last_updated = marked_updated     # type: ignore[attr-defined]
     return placed, seeded
 
 
 def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
-                      appearance: str = "dark") -> int:
+                      appearance: str = "dark", round_build: str = "") -> int:
     """Turn verdicts into board annotations. Never touches a human's entries."""
     target = "after" if as_after else "before"
     app = "light" if appearance == "light" else "dark"
@@ -108,9 +274,14 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
         except (OSError, json.JSONDecodeError):
             pass
 
+    shot_images = {f"{s.id}.png" for s in shots}
     kept = [
         a for a in base.get("annotations", [])
-        if not (a.get("source") == MARK and (a.get("appearance") or "dark") == app)
+        if not (
+            a.get("source") == MARK
+            and (a.get("appearance") or "dark") == app
+            and a.get("image") in shot_images
+        )
     ]
     made = []
     for s in shots:
@@ -135,7 +306,7 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
                 text += "：OCR 不可用，文字断言未执行（不算通过）"
             text += f"；OCR：{(s.text or '')[:120]}"
             status = "open"
-        made.append({
+        entry = {
             "id": f"AI-{s.id}" if app == "dark" else f"AI-{s.id}-light",
             "image": f"{s.id}.png", "target": target,
             "appearance": app,
@@ -144,13 +315,17 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
             "text": text, "reply": "", "status": status,
             "createdAt": when or datetime.now().astimezone().isoformat(timespec="seconds"),
             "source": MARK,
-        })
+        }
+        if round_build:
+            entry["raisedIn"] = str(round_build)
+        made.append(entry)
 
     payload = {
         "version": base.get("version", 1),
         "directory": os.path.basename(board_dir),
         "updatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "annotations": kept + made,
+        "screenChecks": base.get("screenChecks", {}),
     }
     with open(path, "w", encoding="utf-8") as f:
         json.dump(payload, f, ensure_ascii=False, indent=2)
@@ -158,28 +333,51 @@ def write_annotations(board_dir: str, shots, as_after=False, when: str = "",
     return len(made)
 
 
-def read(board_dir: str, statuses=RELEVANT):
+def read(board_dir: str, statuses=RELEVANT, with_inspect: bool = False):
     """Read back what a human left open/rejected, so an agent can act on it."""
     path = os.path.join(board_dir, "annotations.json")
     if not os.path.exists(path):
         raise FileNotFoundError(f"没有 annotations.json：{path}")
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
+    if with_inspect:
+        from . import dispatcher as _dispatcher
+        from pathlib import Path
     rows = []
     for a in data.get("annotations", []):
         if statuses and a.get("status") not in statuses:
             continue
-        rows.append({
+        item = {
             "id": a.get("id"), "image": a.get("image"),
             "target": a.get("target", "before"),
             "appearance": a.get("appearance", "dark"),
             "author": a.get("author"),
             "kind": a.get("kind"), "status": a.get("status"),
-            "text": a.get("text", ""), "rejectReason": a.get("rejectReason", ""),
+            "text": a.get("text", ""),
+            "aiReply": a.get("aiReply", ""),
+            "rejectReason": a.get("rejectReason", ""),
             # 必须在剥离 aiReply 之前算，否则下游拿到的是空值
             "fixedIn": fixed_in(a),
             "box": {"x": a.get("x"), "y": a.get("y"), "w": a.get("w"), "h": a.get("h")},
-        })
+        }
+        if a.get("elementHint"):
+            item["elementHint"] = a["elementHint"]
+        if with_inspect:
+            mode = "light" if (a.get("appearance") or "dark") == "light" else "dark"
+            rb = str(a.get("raisedIn") or "")
+            insp = _inspect.inspect_annotation(board_dir, a, appearance=mode, build=rb)
+            if insp.get("summary"):
+                item["elementHint"] = insp["summary"]
+            item["inspection"] = {
+                "ax": insp.get("ax"),
+                "ocr": insp.get("ocr"),
+                "normFrame": insp.get("normFrame"),
+            }
+            shot = _dispatcher.resolve_screenshot_path(
+                Path(board_dir), str(a.get("image") or ""), mode, rb
+            )
+            item["screenshotPath"] = str(shot)
+        rows.append(item)
     return rows
 
 
@@ -333,8 +531,10 @@ def push_annotations(url: str, board_dir: str) -> bool:
         return False
     try:
         with open(os.path.join(board_dir, "annotations.json"), encoding="utf-8") as f:
-            anns = json.load(f).get("annotations", [])
-        body = json.dumps({"annotations": anns}, ensure_ascii=False).encode("utf-8")
+            raw = json.load(f)
+        anns = raw.get("annotations", [])
+        checks = raw.get("screenChecks", {})
+        body = json.dumps({"annotations": anns, "screenChecks": checks}, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(url.rstrip("/") + "/api/annotations", data=body,
                                      headers={"Content-Type": "application/json"},
                                      method="POST")
@@ -405,11 +605,27 @@ def snapshot(src_dir: str = "", src_url: str = ""):
     if src_url:
         raw = _http_get(src_url.rstrip("/") + "/api/state")
         data = json.loads(raw.decode("utf-8"))
+        rounds = [
+            {"build": r.get("build", ""), "images": list(r.get("images") or [])}
+            for r in (data.get("afterRounds") or [])
+        ]
+        if not rounds and data.get("afterImages"):
+            rounds = [{"build": "", "images": list(data.get("afterImages") or [])}]
+        light_rounds = [
+            {"build": r.get("build", ""), "images": list(r.get("images") or [])}
+            for r in (data.get("lightAfterRounds") or [])
+        ]
+        if not light_rounds and data.get("lightAfterImages"):
+            light_rounds = [{"build": "", "images": list(data.get("lightAfterImages") or [])}]
         return {
             "dir": data.get("dir", ""),
-            "images": data.get("images", []),
-            "after": data.get("afterImages", []),
-            "annotations": data.get("annotations", []),
+            "images": list(data.get("images") or []),
+            "lightImages": list(data.get("lightImages") or []),
+            "after": list(data.get("afterImages") or []),
+            "lightAfter": list(data.get("lightAfterImages") or []),
+            "rounds": rounds,
+            "lightRounds": light_rounds,
+            "annotations": list(data.get("annotations") or []),
         }
     if not src_dir:
         raise ValueError("需要 src_dir 或 src_url")
@@ -428,40 +644,57 @@ def snapshot(src_dir: str = "", src_url: str = ""):
                       and n.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))
                       and not n.startswith("."))
 
-    rounds = []
-    if src_url:
-        for r in data.get("afterRounds") or []:
-            rounds.append({"build": r.get("build", ""), "images": r.get("images") or []})
-    else:
-        after_dir = os.path.join(src_dir, "after")
-        flat = _imgs("after")
+    def _collect_rounds(rel_base, skip=()):
+        out_rounds = []
+        base_path = os.path.join(src_dir, rel_base)
+        flat = _imgs(rel_base)
         if flat:
-            rounds.append({"build": "", "images": flat})
-        if os.path.isdir(after_dir):
-            for name in sorted(os.listdir(after_dir)):
-                sub = os.path.join(after_dir, name)
-                if os.path.isdir(sub) and not name.startswith(".") and name not in ("light", "dark"):
-                    imgs = _imgs(os.path.join("after", name))
+            out_rounds.append({"build": "", "images": flat})
+        if os.path.isdir(base_path):
+            for name in sorted(os.listdir(base_path)):
+                sub = os.path.join(base_path, name)
+                if os.path.isdir(sub) and not name.startswith(".") and name not in skip:
+                    imgs = _imgs(os.path.join(rel_base, name))
                     if imgs:
-                        rounds.append({"build": name, "images": imgs})
+                        out_rounds.append({"build": name, "images": imgs})
+        return out_rounds
 
-    after_all = []
-    for r in rounds:
-        for n in r["images"]:
-            if n not in after_all:
-                after_all.append(n)
-    return {"dir": os.path.abspath(src_dir), "images": _imgs(), "after": after_all,
-            "rounds": rounds, "annotations": anns}
+    rounds = _collect_rounds("after", skip=("light", "dark"))
+    light_rounds = _collect_rounds(os.path.join("after", "light"))
+
+    def _union_names(rlist):
+        seen = []
+        for r in rlist:
+            for n in r["images"]:
+                if n not in seen:
+                    seen.append(n)
+        return seen
+
+    return {
+        "dir": os.path.abspath(src_dir),
+        "images": _imgs(),
+        "lightImages": _imgs("light"),
+        "after": _union_names(rounds),
+        "lightAfter": _union_names(light_rounds),
+        "rounds": rounds,
+        "lightRounds": light_rounds,
+        "annotations": anns,
+    }
 
 
-def _copy_round_image(src_dir, src_url, name, build, dst_dir):
-    dst = os.path.join(dst_dir, "after", build, name) if build \
-        else os.path.join(dst_dir, "after", name)
+def _copy_round_image(src_dir, src_url, name, build, dst_dir, appearance: str = "dark"):
+    is_light = appearance == "light"
+    base_parts = ["after", "light"] if is_light else ["after"]
+    if build:
+        base_parts.append(build)
+    dst = os.path.join(dst_dir, *base_parts, name)
     if os.path.exists(dst):
         return False
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if src_url:
-        prefix = "/after/" + (urllib.parse.quote(build) + "/" if build else "")
+        app_seg = "light/" if is_light else ""
+        build_seg = (urllib.parse.quote(build) + "/") if build else ""
+        prefix = f"/after/{app_seg}{build_seg}"
         try:
             data = _http_get(src_url.rstrip("/") + prefix + urllib.parse.quote(name))
         except Exception:
@@ -469,8 +702,7 @@ def _copy_round_image(src_dir, src_url, name, build, dst_dir):
         with open(dst, "wb") as f:
             f.write(data)
         return True
-    src = os.path.join(src_dir, "after", build, name) if build \
-        else os.path.join(src_dir, "after", name)
+    src = os.path.join(src_dir, *base_parts, name)
     if not os.path.exists(src):
         return False
     shutil.copy2(src, dst)
@@ -483,7 +715,12 @@ def _copy_image(src_dir, src_url, name, sub, dst_dir):
         return False
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if src_url:
-        prefix = "/after/" if sub else "/images/"
+        if sub == "light":
+            prefix = "/images/light/"
+        elif sub:
+            prefix = "/after/"
+        else:
+            prefix = "/images/"
         try:
             data = _http_get(src_url.rstrip("/") + prefix + urllib.parse.quote(name))
         except Exception:
@@ -512,14 +749,40 @@ def merge(src_dir: str, dst_dir: str, src_url: str = "", prefer: str = "skip"):
     """
     src = snapshot(src_dir=src_dir, src_url=src_url)
     os.makedirs(dst_dir, exist_ok=True)
-    stat = {"images": 0, "after": 0, "added": 0, "renamed": 0, "duplicate": 0}
+    stat = {"images": 0, "after": 0, "lightImages": 0, "lightAfter": 0,
+            "added": 0, "renamed": 0, "duplicate": 0}
+    disk_src = src["dir"] if not src_url else ""
 
     for name in src["images"]:
-        stat["images"] += 1 if _copy_image(src["dir"] if not src_url else "", src_url, name, "", dst_dir) else 0
+        stat["images"] += 1 if _copy_image(disk_src, src_url, name, "", dst_dir) else 0
+    for name in src.get("lightImages") or []:
+        if _copy_image(disk_src, src_url, name, "light", dst_dir):
+            stat["images"] += 1
+            stat["lightImages"] += 1
     for r in src.get("rounds") or []:
         for name in r["images"]:
             stat["after"] += 1 if _copy_round_image(
-                src["dir"] if not src_url else "", src_url, name, r["build"], dst_dir) else 0
+                disk_src, src_url, name, r["build"], dst_dir, appearance="dark") else 0
+    for r in src.get("lightRounds") or []:
+        for name in r["images"]:
+            if _copy_round_image(disk_src, src_url, name, r["build"], dst_dir, appearance="light"):
+                stat["after"] += 1
+                stat["lightAfter"] += 1
+
+    if disk_src:
+        src_meta = os.path.join(disk_src, ".meta")
+        if os.path.isdir(src_meta):
+            dst_meta = os.path.join(dst_dir, ".meta")
+            for root_dir, _, files in os.walk(src_meta):
+                rel_dir = os.path.relpath(root_dir, src_meta)
+                for fname in files:
+                    if not fname.endswith(".json"):
+                        continue
+                    src_file = os.path.join(root_dir, fname)
+                    dst_file = os.path.join(dst_meta, rel_dir, fname) if rel_dir != "." else os.path.join(dst_meta, fname)
+                    if not os.path.exists(dst_file):
+                        os.makedirs(os.path.dirname(dst_file), exist_ok=True)
+                        shutil.copy2(src_file, dst_file)
 
     path = os.path.join(dst_dir, "annotations.json")
     base = {"version": 1, "directory": os.path.basename(dst_dir), "annotations": []}
@@ -532,19 +795,27 @@ def merge(src_dir: str, dst_dir: str, src_url: str = "", prefer: str = "skip"):
         except (OSError, json.JSONDecodeError):
             pass
 
+    def _ann_key(entry):
+        return (
+            entry.get("image"),
+            entry.get("appearance") or "dark",
+            entry.get("text"),
+            entry.get("x"),
+            entry.get("y"),
+        )
+
     existing = base["annotations"]
     by_id = {a.get("id"): a for a in existing}
-    seen_text = {(a.get("image"), a.get("text"), a.get("x"), a.get("y")) for a in existing}
+    seen_text = {_ann_key(a) for a in existing}
     tag = os.path.basename(src["dir"].rstrip("/")) or "imported"
 
     for a in src["annotations"]:
-        key = (a.get("image"), a.get("text"), a.get("x"), a.get("y"))
+        key = _ann_key(a)
         if key in seen_text:
             if prefer != "src":
                 stat["duplicate"] += 1
                 continue
-            existing = [b for b in existing if (b.get("image"), b.get("text"),
-                                                b.get("x"), b.get("y")) != key]
+            existing = [b for b in existing if _ann_key(b) != key]
             for b in list(by_id):
                 if by_id[b] not in existing:
                     by_id.pop(b, None)

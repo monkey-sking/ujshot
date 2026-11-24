@@ -12,6 +12,7 @@ import datetime
 import json
 import os
 import queue
+import re
 import shutil
 import signal
 import subprocess
@@ -19,7 +20,9 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from . import inspect as _inspect
 
 try:
     import tomllib  # Python 3.11+
@@ -229,6 +232,7 @@ def build_prompt(
     annotations: List[Dict[str, Any]],
     appearance: str = "dark",
     image: str = "",
+    render_markers: bool = True,
 ) -> str:
     """Construct a structured, closed-loop prompt for the dispatched agent."""
     mode = "light" if appearance == "light" else "dark"
@@ -244,10 +248,26 @@ def build_prompt(
         "## 待处理批注",
     ]
     for a in annotations:
-        aid = a.get("id", "?")
-        img = a.get("image") or image
+        aid = str(a.get("id") or "?")
+        img = str(a.get("image") or image)
+        ann_mode = "light" if (a.get("appearance") or mode) == "light" else "dark"
+        ann_mode_cn = "亮色" if ann_mode == "light" else "暗色"
         rb = str(a.get("raisedIn") or "")
-        shot_path = resolve_screenshot_path(board_dir, img, mode, rb)
+        shot_path = resolve_screenshot_path(board_dir, img, ann_mode, rb)
+        insp = _inspect.inspect_annotation(board_dir, a, appearance=ann_mode, build=rb)
+        summary = str(insp.get("summary") or a.get("elementHint") or "").strip()
+
+        marked_path: Optional[Path] = None
+        if render_markers and shot_path.is_file():
+            safe_aid = re.sub(r"[^A-Za-z0-9_.-]+", "_", aid) or "item"
+            ref_path = board_dir / ".dispatch-logs" / "refs" / f"{safe_aid}-{ann_mode}-{rb or 'base'}.png"
+            marked_path = _inspect.render_annotated_image(
+                shot_path,
+                ref_path,
+                a,
+                element_norm_frame=insp.get("normFrame"),
+            )
+
         kind = a.get("kind", "pin")
         x = round(float(a.get("x", 0)) * 100)
         y = round(float(a.get("y", 0)) * 100)
@@ -257,10 +277,16 @@ def build_prompt(
             loc = f"框选 ({x}%, {y}%, 宽 {w}% × 高 {h}%)"
         else:
             loc = f"图钉 ({x}%, {y}%)"
-        lines.append(f"### {aid} · `{img}`（{mode_cn}，提出于 Build {rb or '未知'}）")
+        lines.append(f"### {aid} · `{img}`（{ann_mode_cn}，提出于 Build {rb or '未知'}）")
         lines.append(f"- 原图路径：`{shot_path}`")
+        if marked_path is not None:
+            lines.append(f"- 红框标注图：`{marked_path}`")
         lines.append(f"- 标注位置：{loc}")
+        if summary:
+            lines.append(f"- 定位线索（AX / OCR）：`{summary}`")
         lines.append(f"- 问题描述：{a.get('text', '').strip()}")
+        if a.get("aiReply"):
+            lines.append(f"- 已批准方案 / AI 回复：{a['aiReply'].strip()}")
         if a.get("reply"):
             lines.append(f"- 补充说明：{a['reply'].strip()}")
         if a.get("rejectReason"):
@@ -269,13 +295,38 @@ def build_prompt(
 
     lines += [
         "## 执行要求（闭环终点）",
-        "1. 先阅读原图与项目 `AGENTS.md` 规范，定位根因并在代码中修复上述全部问题。",
-        "2. 运行必要的构建与单测验证修复生效。",
+        "1. 先阅读原图（如有「红框标注图」优先查看红框位置）与项目 `AGENTS.md` 规范，结合「定位线索（AX / OCR）」在代码中定位根因：优先用 `#identifier`、`AXLabel` 或 `near` 中的同行固定文案搜索源码（金额、时间等动态数值优先搜同行静态标签）；文字线索与代码已足够确定时无需反复读多余图片。",
+        "2. 做满足问题修复所需的最小改动，不要顺手重构无关代码；然后运行必要的构建与单测验证修复生效。",
         f"3. 使用 `ujshot run --appearance {mode} --board-dir \"{board_dir}\" --board-as-after` 在**相同外观（{mode}）**下重新截图灌回评审板（严禁把暗色/亮色混槽）。",
         f"4. 更新 `{ann_file}` 中对应批注的 `status` 为 `\"fixed\"`、写入本次 `fixedIn` 构建号与简洁的 `aiReply`（说明改了什么、验证结果）。",
         "5. **不要执行 `git commit` 或 `git push`**，保留改动待人工在评审板点击「通过」后再提交。",
     ]
     return "\n".join(lines) + "\n"
+
+
+def queue_to_codex(
+    thread: str,
+    prompt: str,
+    resume: bool = False,
+    codex_bin: str = "",
+) -> Tuple[bool, str]:
+    """Queue an enriched prompt directly into a running Codex CLI session."""
+    exe = (codex_bin or os.environ.get("FIXKIT_CODEX") or shutil.which("codex") or "").strip()
+    if not exe:
+        return False, "未找到 codex CLI"
+    target = str(thread or "").strip()
+    if not target:
+        return False, "需要指定 Codex 会话 ID 或名称 (--thread)"
+    cmd = [exe, "queue", f"--thread={target}", f"--message={prompt}"]
+    if resume:
+        cmd.append("--resume")
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        return False, str(exc)
+    if proc.returncode == 0:
+        return True, (proc.stdout or "").strip()
+    return False, (proc.stderr or proc.stdout or f"exit {proc.returncode}").strip()
 
 
 @dataclass

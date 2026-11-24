@@ -66,9 +66,11 @@ for path in args.dropFirst() {
         let box = observation.boundingBox
         let x = box.origin.x
         let y = 1 - box.origin.y - box.size.height
-        let cx = x + box.size.width / 2
-        let cy = y + box.size.height / 2
-        lines.append("{\"t\":\"\(jsonEscape(top.string))\",\"x\":\(String(format: "%.4f", x)),\"y\":\(String(format: "%.4f", y)),\"cx\":\(String(format: "%.4f", cx)),\"cy\":\(String(format: "%.4f", cy))}")
+        let w = box.size.width
+        let h = box.size.height
+        let cx = x + w / 2
+        let cy = y + h / 2
+        lines.append("{\"t\":\"\(jsonEscape(top.string))\",\"x\":\(String(format: "%.4f", x)),\"y\":\(String(format: "%.4f", y)),\"w\":\(String(format: "%.4f", w)),\"h\":\(String(format: "%.4f", h)),\"cx\":\(String(format: "%.4f", cx)),\"cy\":\(String(format: "%.4f", cy))}")
     }
     print("{\"file\":\"\(jsonEscape(path))\",\"w\":\(cg.width),\"h\":\(cg.height),\"lines\":[\(lines.joined(separator: ","))]}")
 }

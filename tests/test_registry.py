@@ -1,7 +1,4 @@
-"""Board registry: lives in the project, stores relative paths, never loses boards.
-
-（原先在 LifeOS 的 Scripts/Tests 里，评审板并入 ujshot 后跟着搬过来。）
-"""
+"""Board registry: lives in the project, stores relative paths, never loses boards."""
 
 from __future__ import annotations
 

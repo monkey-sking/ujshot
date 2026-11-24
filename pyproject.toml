@@ -19,6 +19,10 @@ classifiers = [
 ]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/monkey-sking/ujshot"
+Repository = "https://github.com/monkey-sking/ujshot"
+
 [project.optional-dependencies]
 # 像素差异（no-visible-change 判定）。不装也能跑，只是跳过 diff 判定。
 diff = ["pillow>=9.0"]
@@ -31,4 +35,4 @@ ujshot-board = "ujshot.reviewboard:main"
 packages = ["ujshot"]
 
 [tool.setuptools.package-data]
-ujshot = ["assets/*.swift", "assets/*.json"]
+ujshot = ["assets/*.swift", "assets/*.json", "assets/*.html"]

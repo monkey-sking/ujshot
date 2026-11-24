@@ -6,3 +6,4 @@ build/
 dist/
 ujshot-out/
 .venv/
+uv.lock

@@ -93,3 +93,61 @@ def test_merge_keeps_existing_images_untouched(tmp_path):
 def test_merge_requires_a_source(tmp_path):
     with pytest.raises(ValueError):
         board.merge(src_dir="", dst_dir=str(tmp_path))
+
+
+def test_copy_shots_skips_unchanged_and_marks_updated(tmp_path):
+    Image = pytest.importorskip("PIL.Image")
+    from ujshot.types import Step
+
+    bdir = str(tmp_path / "board")
+    out245 = str(tmp_path / "out245")
+    out246 = str(tmp_path / "out246")
+    os.makedirs(os.path.join(out245, "screens"))
+    os.makedirs(os.path.join(out246, "screens"))
+
+    for sid, color in [("s1", (20, 20, 20)), ("s2", (30, 30, 30))]:
+        Image.new("RGB", (200, 400), color).save(os.path.join(out245, "screens", f"{sid}.png"))
+
+    shots = [Step(id="s1", title="s1", verdict="ok"), Step(id="s2", title="s2", verdict="ok")]
+    placed245, _ = board.copy_shots(bdir, out245, shots, as_after=True, round_build="245")
+    assert placed245 == ["s1.png", "s2.png"]
+
+    ann_path = os.path.join(bdir, "annotations.json")
+    with open(ann_path, "w", encoding="utf-8") as f:
+        json.dump({
+            "version": 1,
+            "directory": "board",
+            "annotations": [],
+            "screenChecks": {
+                "dark:s1.png": {"status": "ok", "build": "245"},
+                "dark:s2.png": {"status": "ok", "build": "245"},
+            },
+        }, f)
+
+    # s1 unchanged in main area (only status bar clock area changed)
+    im1 = Image.new("RGB", (200, 400), (20, 20, 20))
+    for x in range(40):
+        for y in range(10):
+            im1.putpixel((x, y), (255, 255, 255))
+    im1.save(os.path.join(out246, "screens", "s1.png"))
+
+    # s2 updated in main content area
+    im2 = Image.new("RGB", (200, 400), (30, 30, 30))
+    for x in range(100):
+        for y in range(120, 220):
+            im2.putpixel((x, y), (220, 120, 40))
+    im2.save(os.path.join(out246, "screens", "s2.png"))
+
+    placed246, _ = board.copy_shots(bdir, out246, shots, as_after=True, round_build="246")
+    board.write_annotations(bdir, shots, as_after=True, round_build="246")
+
+    assert placed246 == ["s2.png"]
+    assert not os.path.exists(os.path.join(bdir, "after", "246", "s1.png"))
+    assert os.path.exists(os.path.join(bdir, "after", "246", "s2.png"))
+
+    after_data = json.load(open(ann_path, encoding="utf-8"))
+    checks = after_data["screenChecks"]
+    assert checks["dark:s1.png"]["status"] == "ok"
+    assert checks["dark:s2.png"]["status"] == "updated"
+    assert checks["dark:s2.png"]["prevBuild"] == "245"
+    assert checks["dark:s2.png"]["build"] == "246"

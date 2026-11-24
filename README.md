@@ -1,5 +1,35 @@
 # ujshot
 
+> **Zero-invasion iOS Simulator UI walkthroughs, OCR/AX CI gates, multi-round visual review board & local AI agent dispatcher.**
+
+No SDK to link, no `@ViewBuilder` macro side effects, no source code edits required. Drive any iOS app in the Simulator from declarative JSON flows, verify on-screen copy with Vision OCR + regex rules, review dark/light builds side-by-side or with a curtain slider, long-press live screens to extract AX/OCR element clues, and dispatch annotations with red-box marker PNGs directly to **Claude Code**, **Codex**, **Antigravity**, or **OpenCode**.
+
+### Highlights
+
+- **Declarative JSON walkthroughs & CI gates** (`ujshot run --flow smoke`): 5-step element resolution (`AXUniqueId` → prefix → `AXLabel` → contains → Vision OCR coordinates), `expect` / `expectAbsent` (including `re:` regex rules), dead-tap detection (`no-visible-change`), and non-zero exit codes for CI.
+- **Zero-invasion AX/OCR element inspection**: Automatically archives `.meta/*.ax.json` and `.ocr.json` sidecars; pin or box annotations resolve the target element (`#identifier`, `AXLabel`, enclosing `within` container, and same-row `near` labels) and attach red-box marker screenshots when dispatching to agents.
+- **Multi-round Dark/Light Review Board** (`ujshot-board`): Single daemon hosting multiple boards under `/b/<name>/`, strict dark/light appearance slots, `after/<build>/` per-build preservation, automatic unchanged-screen deduplication, cross-screen regression detection (`↻ updated`), and side-by-side / curtain-slider / single-image views.
+- **Live Simulator Control & Long-Press Annotate**: Tap, swipe, type, and launch inside the browser; long-press (`480ms` or `Option+Click`) to freeze a crisp frame, inspect the pressed element, and open an annotation right away.
+- **Local AI Agent Dispatch**: Serial per-repo execution queue with live `stream-json` progress & `--resume` session continuation, plus direct `codex queue` hot-session injection via CLI or Web UI.
+
+### Quickstart
+
+Requires macOS + Xcode Simulator + [AXe](https://github.com/cameroncooke/AXe). Core runtime has zero mandatory Python dependencies (`[diff]` adds Pillow for pixel diffs and red-box marker images).
+
+```bash
+brew install cameroncooke/axe/axe
+uv tool install "git+https://github.com/monkey-sking/ujshot.git" --with pillow
+# or: pipx install "git+https://github.com/monkey-sking/ujshot.git[diff]"
+
+ujshot doctor
+ujshot init
+ujshot run --flow smoke --board-dir artifacts/review-board --board-as-after --serve
+```
+
+---
+
+## 中文文档
+
 iOS 模拟器界面走查自动化：**点进去 → 截图 → 抓 AX 树 → OCR 识别文案 → 出一份 HTML 图册**，一条命令。
 
 ```bash
@@ -24,7 +54,7 @@ ujshot run --flow smoke --open
 brew install cameroncooke/axe/axe     # AX 树 / 点击 / 滑动
 xcode-select --install                # 如果还没装命令行工具
 
-git clone <this repo> ~/dev/ujshot
+git clone https://github.com/monkey-sking/ujshot.git ~/dev/ujshot
 pipx install -e ~/dev/ujshot          # 或者：pip install -e ~/dev/ujshot[diff]
 ```
 
@@ -168,16 +198,18 @@ OCR 兜底不是锦上添花：`axe describe-ui` 在部分模拟器上会偶发�
 | `optional-missing` | 可选目标不存在 | 否 |
 
 `expectAbsent` 是这套工具最实用的一个字段。典型用法：中文界面里不该出现 ISO
-货币代码。
+货币代码，或用 `re:<正则>` 做全角/汉字/格式断言（`expect`、`expectAbsent`、`ujshot check`、`op: "expect"`、`op: "ensure"` 均通用）：
 
 ```json
 { "op": "shot", "id": "03-currency", "expect": ["设置"], "expectAbsent": ["CNY", "USD"] }
+{ "op": "shot", "id": "04-english", "expect": ["Settings"], "expectAbsent": ["re:[\\u4e00-\\u9fff]"] }
 ```
 
 同一套断言也能离线跑在**任何已有截图**上（不起模拟器）：
 
 ```bash
 ujshot check --image old-shot.png --expect 设置 --must-not CNY,USD
+ujshot check --image en-shot.png --expect Settings --must-not 're:[\u4e00-\u9fff]'
 # {"verdict":"unexpected-text","leaked":["CNY"],...}   退出码 1
 ```
 
@@ -271,13 +303,21 @@ ujshot run --flow smoke \
 | 参数 | 作用 |
 |---|---|
 | `--board-dir` | 把截图灌进板子目录 |
-| `--board-as-after` | 进 `after/`（改名后图） |
+| `--board-as-after` | 进 `after/`（改后图） |
 | `--board-round` | 进 `after/<build>/`；默认取 App 的构建号，`none` 退回 `after/` 根目录 |
+| `--board-force-all` | 强制拷贝全部截图（默认自动跳过画面未变化且无问题的界面） |
 | `--board-baseline` | 改前图目录，按流程的 `beforeMap` 配对 |
 | `--board-script` | 换用别的板子程序；不写就用内置的 |
 | `--serve` | 起板子并打印地址 |
 
 自动批注带 `source: "ujshot"`，**重跑只替换自己那批，不动人的批注**。
+
+### 智能去重与「界面有更新」自动检测
+
+在多轮 `--board-as-after` 模式下，`ujshot` 会将每张新截图与上一轮最新截图做像素对比（自动裁掉顶部 5.5% 的系统状态栏时间/电量区域）：
+
+1. **未改动且无问题的界面自动跳过**：如果像素差异 `< 0.25%` 且该界面没有待处理/待验收的人工批注，**不再往 `after/<build>/` 重复拷贝相同截图**（需要强制全量存图时传 `--board-force-all`）。
+2. **连带变动自动标为「↻ 界面有更新」**：如果某界面之前已点过「✓ 界面没问题」（或历史人工批注已全部「已通过」），但受公共组件或其他改动影响导致画面变化（像素差 `>= 0.25%`），`ujshot` 会保存新图并在评审板上自动将其标为 **「↻ 有更新」**（`screenChecks[key].status = "updated"`），点开时自动并排对照变动前后的两个 Build。
 
 ### 一个原始问题修了好几轮
 
@@ -307,14 +347,17 @@ after/235/01-fab.png     ← 第二轮（第一轮原样留着）
 
 `status` 仍是这条批注的最新结论（顶部统计、列表筛选看它），`rounds` 只负责记历史。
 
-反向读人标的：
+反向读人标的（加 `--inspect` 自动反查 `.meta/` 中的 AX 树与 OCR，返回命中控件 `#identifier` / `AXLabel` / 同行相邻标签）：
 
 ```bash
-ujshot board --read out/board --status rejected
-# [{id, image, target, status, text, rejectReason, box:{x,y,w,h}}, ...]
+ujshot board --read out/board --status rejected --inspect
+# [{id, image, target, status, text, elementHint, inspection, screenshotPath, box:{x,y,w,h}}, ...]
+
+# 直接把匹配批注（含定位线索与红框标注图）投递进正在运行的 Codex 会话
+ujshot board --read out/board --status open,rejected --queue-codex <session-id>
 ```
 
-`box` 是归一化坐标（0…1），拿来定位足够。
+`box` 是归一化坐标（0…1），拿来定位足够；在实时模拟器模式下**长按（480ms）或 Option+点击**画面会自动定格高清截图、抓 AX/OCR 元数据并直接弹出元素定位提示。派发给本地 Agent 时，`ujshot` 会把命中的 AX/OCR 定位线索与临时红框标注图一起写进提示词。
 
 ### 迁移/合并另一个板子
 
@@ -368,6 +411,34 @@ ujshot board --import-url http://127.0.0.1:8765 --into out/board \
 | 走查脚本把种子数据改花 | 危险标签默认跳过（`dangerous`） |
 | 已知缺陷让流程整条卡死 | `ensure` op：断言 + 补点，穿过缺陷继续走 |
 
+## 截图命名规范（`shot.id`）
+
+评审板直接把 `shot.id` 作为文件名与图片标题，并按文件名绑定改前/改后对比与批注。为避免同一看板里中英文标题混杂：
+
+- **统一三段格式**：`编号-页面-状态`（两位/三位编号 + 可选字母后缀，不含 `.png`），例如 `01-首页-默认态`、`07b-弹窗-记账转账`、`36-首页-浅色`。
+- **禁止中英混排**：同一流程文件内混用中文 ID 与纯英文 ID 会被 `ujshot` 直接拦截报错。
+- **项目级强制风格**：在项目根目录 `ujshot.toml` 的 `[board]` 下配置 `shot_id_style = "zh"`（或 `"en"`），运行 `ujshot run` / `--dry-run` 时会自动校验每条 `shot.id`：
+  ```toml
+  [board]
+  port = 8766
+  shot_id_style = "zh"
+  ```
+
 ## 许可
 
 MIT。见 [LICENSE](LICENSE)。
+
+---
+
+## AI Agent Skills（内置技能）
+
+仓库自带面向 Claude Code / Codex / Gemini / OpenCode 等 Agent 的通用技能，位于 [`skills/`](skills/)（不含任何特定项目配置，可直接软链或复制到全局技能目录）：
+
+- [`skills/ujshot/SKILL.md`](skills/ujshot/SKILL.md)：iOS 模拟器自动化走查、文案断言（`expect` / `expectAbsent`）、三段式截图命名规范与评审板灌图工作流。
+- [`skills/ui-review-board/SKILL.md`](skills/ui-review-board/SKILL.md)：内置多版本评审板（`ujshot-board`）的人机闭环协议、暗色/亮色分槽、多轮对比、智能跳过未改动界面与「界面有更新」复核流程。
+
+```bash
+# 安装到全局 Agent 技能目录（示例）
+ln -sfn "$(pwd)/skills/ujshot" ~/.agents/skills/ujshot
+ln -sfn "$(pwd)/skills/ui-review-board" ~/.agents/skills/ui-review-board
+```

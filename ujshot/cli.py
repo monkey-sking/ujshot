@@ -46,6 +46,7 @@ def main(argv=None) -> int:
     p_run.add_argument("--seed", help="覆盖 App 容器里的状态文件")
     p_run.add_argument("--seed-to", help="种子文件在容器内的相对路径（覆盖配置的 app.state_path）")
     p_run.add_argument("--appearance", choices=["dark", "light"], help="外观（覆盖配置）")
+    p_run.add_argument("--launch-arg", action="append", default=[], help="追加 App 启动参数（可重复）")
     p_run.add_argument("--wait-scale", type=float, default=1.0, help="整体等待倍率，慢机器用 1.5")
     p_run.add_argument("--open", action="store_true", help="跑完打开图册")
     p_run.add_argument("--no-restart", action="store_true", help="不重启 App（从当前界面开始）")
@@ -58,6 +59,8 @@ def main(argv=None) -> int:
     p_run.add_argument("--board-baseline", help="改前图目录（配合 --board-as-after）")
     p_run.add_argument("--board-round", metavar="BUILD",
                        help="改后图放进 after/<BUILD>/ 这一轮（默认取 App 的构建号；传 none 退回 after/ 根目录）")
+    p_run.add_argument("--board-force-all", action="store_true",
+                       help="强制拷贝全部截图（默认跳过画面未变化且无问题的界面）")
     p_run.add_argument("--board-script", help="评审板脚本路径（外部工具）")
     p_run.add_argument("--serve", action="store_true", help="跑完顺便起评审板")
     p_run.add_argument("--serve-port", type=int, help="评审板首选端口（默认取配置）")
@@ -72,8 +75,14 @@ def main(argv=None) -> int:
     # ---- board
     p_board = sub.add_parser("board", help="读写评审板批注")
     p_board.add_argument("--read", metavar="DIR", help="读这个板子目录的批注")
-    p_board.add_argument("--status", default="open,rejected,fixed",
+    p_board.add_argument("--status", default="open,proposed,approved,rejected,fixed",
                          help="只看这些状态（逗号分隔；传 all 看全部）")
+    p_board.add_argument("--inspect", action="store_true",
+                         help="配合 --read：附带 AX/OCR 元素定位线索与截图路径")
+    p_board.add_argument("--appearance", choices=["dark", "light"],
+                         help="配合 --read / --queue-codex：按外观过滤批注")
+    p_board.add_argument("--queue-codex", metavar="THREAD",
+                         help="配合 --read：将匹配批注（含定位线索与红框图）直接投递给正在运行的 Codex 会话")
     p_board.add_argument("--import", dest="import_src", metavar="DIR",
                          help="把另一个板子的图 + 人工批注并入目标板")
     p_board.add_argument("--import-url", metavar="URL",
@@ -165,7 +174,7 @@ def _cmd_run(args) -> int:
 
     flow_path = config.resolve_flow(cfg, args.flow)
     try:
-        fl = flowmod.load(flow_path)
+        fl = flowmod.load(flow_path, shot_id_style=cfg.shot_id_style)
     except flowmod.FlowError as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
@@ -210,6 +219,9 @@ def _cmd_run(args) -> int:
             return 2
 
     dev.prepare(udid, cfg.appearance)
+    if args.launch_arg:
+        fl.extra_launch_args = list(args.launch_arg)
+        fl.launch_args = list(fl.launch_args) + [a for a in args.launch_arg if a not in fl.launch_args]
 
     rn = runner.Runner(axe=axe, udid=udid, flow=fl, outdir=outdir,
                        bundle=cfg.bundle_id, wait_scale=args.wait_scale,
@@ -258,9 +270,13 @@ def _cmd_run(args) -> int:
         placed, seeded = board.copy_shots(
             bdir, outdir, result.shots, as_after=args.board_as_after,
             baseline_dir=args.board_baseline, before_map=fl.before_map,
-            round_build=round_build, appearance=cfg.appearance)
+            round_build=round_build, appearance=cfg.appearance,
+            force_all=getattr(args, "board_force_all", False))
+        skipped = getattr(board.copy_shots, "last_skipped", [])
+        updated = getattr(board.copy_shots, "last_updated", [])
         count = board.write_annotations(bdir, result.shots, as_after=args.board_as_after,
-                                        when=meta["when"], appearance=cfg.appearance)
+                                        when=meta["when"], appearance=cfg.appearance,
+                                        round_build=round_build)
         # 版本跟着图一起进板子：不然过两天就没人知道这批是哪个 Build
         side = "after" if args.board_as_after else "before"
         if version["label"]:
@@ -272,6 +288,10 @@ def _cmd_run(args) -> int:
         if args.board_as_after:
             dest_label = f"after/{app_prefix}{round_build}/" if round_build else f"after/{app_prefix}"
         print(f"  放下 {len(placed)} 张（{cfg.appearance}） → {dest_label}")
+        if skipped:
+            print(f"  跳过未改动界面 {len(skipped)} 张（画面无变化，不重复存图）")
+        if updated:
+            print(f"  检测到已通过界面有更新 {len(updated)} 张 → 自动标记「界面有更新」：{', '.join(updated[:6])}")
         if seeded:
             print(f"  基线图 {len(seeded)} 张 ← {args.board_baseline}")
         print(f"  写入 {count} 条自动批注（source=ujshot，重跑覆盖上一轮）")
@@ -335,9 +355,13 @@ def _cmd_check(args) -> int:
     text = ocr.text_of(info)
     want = [w.strip() for w in args.expect.split(",") if w.strip()]
     forbid = [w.strip() for w in args.must_not.split(",") if w.strip()]
-    missing = [w for w in want if w not in text]
-    leaked = [w for w in forbid if w in text]
-    verdict = "ok" if not missing and not leaked else ("expect-missing" if missing else "unexpected-text")
+    try:
+        verdict, missing, leaked = runner.evaluate_verdict(
+            text, expect=want, expect_absent=forbid, ocr_available=True, blank=False
+        )
+    except Exception as exc:
+        print(f"✗ 正则表达式无效：{exc}", file=sys.stderr)
+        return 2
     payload = {"file": args.image, "verdict": verdict, "missing": missing,
                "leaked": leaked, "text": text[:300]}
     if args.json:
@@ -439,11 +463,48 @@ def _cmd_board(args) -> int:
         return 2
     statuses = None if args.status.strip().lower() == "all" else tuple(
         s.strip() for s in args.status.split(",") if s.strip())
+    app_filter = getattr(args, "appearance", None)
+    if getattr(args, "queue_codex", None):
+        from pathlib import Path
+        from . import dispatcher, reviewboard
+        ann_path = os.path.join(args.read, "annotations.json")
+        if not os.path.exists(ann_path):
+            print(f"✗ 没有 annotations.json：{ann_path}", file=sys.stderr)
+            return 2
+        with open(ann_path, encoding="utf-8") as f:
+            raw_anns = json.load(f).get("annotations", [])
+        chosen = []
+        for a in raw_anns:
+            if statuses and a.get("status") not in statuses:
+                continue
+            if app_filter and (a.get("appearance") or "dark") != app_filter:
+                continue
+            chosen.append(a)
+        if not chosen:
+            print("没有匹配可投递的批注", file=sys.stderr)
+            return 1
+        bpath = Path(args.read).resolve()
+        proj = reviewboard.project_root(bpath) or bpath
+        app_mode = app_filter or (
+            "light" if all((a.get("appearance") or "dark") == "light" for a in chosen) else "dark"
+        )
+        prompt = dispatcher.build_prompt(bpath, proj, chosen, appearance=app_mode)
+        ok, msg = dispatcher.queue_to_codex(args.queue_codex, prompt)
+        if ok:
+            ids = ", ".join(str(a.get("id") or "?") for a in chosen)
+            print(f"✓ 已投递 {len(chosen)} 条批注（{ids}）到 Codex 会话 {args.queue_codex}")
+            if msg:
+                print(msg)
+            return 0
+        print(f"✗ 投递 Codex 失败：{msg}", file=sys.stderr)
+        return 1
     try:
-        rows = board.read(args.read, statuses)
+        rows = board.read(args.read, statuses, with_inspect=bool(getattr(args, "inspect", False)))
     except FileNotFoundError as exc:
         print(f"✗ {exc}", file=sys.stderr)
         return 2
+    if app_filter:
+        rows = [r for r in rows if (r.get("appearance") or "dark") == app_filter]
     print(json.dumps({"board": args.read, "count": len(rows), "items": rows},
                      ensure_ascii=False, indent=1))
     return 0
@@ -559,6 +620,16 @@ def _cmd_doctor() -> int:
         line("!", "配置", "没有 ujshot.toml（用 ujshot init 生成）")
     line("·", "默认设备", cfg.device)
     line("·", "Bundle", cfg.bundle_id or "（未设置）")
+
+    from pathlib import Path
+    from . import dispatcher
+    proj_dir = Path(cfg.source).parent if cfg.source else Path.cwd()
+    agents = dispatcher.discover_agents(proj_dir)
+    avail_agents = [f"{a.id} ({a.label})" for a in agents if a.available]
+    if avail_agents:
+        line("✓", "Agent", ", ".join(avail_agents))
+    else:
+        line("!", "Agent", "未检测到可用 Agent CLI（不影响截图与评审板）")
 
     if axe:
         try:
